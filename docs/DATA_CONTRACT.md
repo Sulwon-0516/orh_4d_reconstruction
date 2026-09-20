@@ -11,10 +11,24 @@ running it.** Stated plainly rather than papered over:
 |---|---|---|
 | clip id | `C001` … `C017`, one `data/C0NN.tar` each (~4.3 GB) | ids are free-form; fine |
 | contents | `C001/videos/<serial>.mp4`, `video_manifest.json`, `cameras.json`, `cam_param/{intrinsics,extrinsics}.json`, `timestamps/<serial>.json`; the JPEG tars contain `manifest.json` + `rgb/<serial>/<frame>.jpg` | `manifest.json` with the schema below, and extracted per-frame images |
-| **foreground masks** | **not present in the published layout** | **required** — the AmbiSuR scene takes each view's alpha from the mask, and the DA3 stage uses a mask visual hull to order cameras |
+| **foreground masks** | **not present in the published layout** | **required**, but see the box below — they affect DA3 grouping only |
 | path style | unknown until extracted | must resolve on the local machine |
 
 Three concrete consequences:
+
+> ### What masks actually do — they do NOT make the output foreground-only
+>
+> Verified in the code, and worth stating plainly because the name misleads:
+> - AmbiSuR's camera loader keeps the alpha channel separately and retains the **unmasked** RGB
+>   (`third_party/AmbiSuR/scene/cameras.py:32,87`), and training's image loss uses that full RGB
+>   (`train.py:174`).
+> - The exporter's validity test is rendered **opacity and depth**, not the mask
+>   (`orhsurf/_vendor/export_surface.py:138`).
+>
+> So the only thing a mask changes is the **camera ordering for the DA3 prior**, via the visual
+> hull in `orhsurf/stages/da3_prior.py::visual_hull_center`. The exported cloud is the **whole
+> scene**, not the subject. Making it foreground-only would be a new feature with its own A/B
+> check, not a configuration change.
 
 1. **Masks are the blocker.** Nothing in the published tree corresponds to our
    `masks_all/<serial>/<frame>.png`. Without them `orhsurf run` stops in `prep` with an explicit
@@ -53,6 +67,8 @@ Required top level:
 |---|---|---|
 | `sequence_id` | str | clip id |
 | `valid_serials` | list[str] | cameras to use. The reference clip has 47 (of 48). |
+| `calibrated_serials` | list[str] | **also required by the loader** (`_vendor/colmap_dataset.py:53`) |
+| `conventions` | dict | **also required by the loader** |
 | `timestamps` | list | one entry per frame; its length is the frame count |
 | `cameras` | dict[serial → camera] | below |
 
@@ -65,6 +81,7 @@ Each camera:
 | `dist_params` | list[5] | OpenCV radtan `(k1,k2,p1,p2,k3)`; **`k3` must be 0** (asserted) |
 | `K_undistort` | 3×3 | intrinsics after `cv2.undistort`; principal point need not be centred |
 | `T_cam_from_world` | 4×4 | **world→camera**, metres. Bottom row `[0,0,0,1]`; rotation orthonormal. Both asserted. |
+| `T_world_from_camera` | 4×4 | **also required by the loader**; must be the inverse of the above |
 | `camera_center_world` | list[3] | camera centre in world coordinates |
 | `valid` | bool | false ⇒ dropped |
 | `frames` | list | per-frame entries |
@@ -74,7 +91,7 @@ Each `frames[i]`:
 | key | meaning |
 |---|---|
 | `index` | must equal `i` (asserted) |
-| `frame_path` | absolute or resolvable path to the RGB frame |
+| `frame_path` | path to the RGB frame. **Consumed as given** — a relative path is NOT resolved against the manifest directory, so use absolute paths or run from the right cwd. |
 | `mask_path` | RGBA PNG whose **ALPHA channel** is the foreground mask. Required. |
 
 ## Conventions, stated because getting them wrong fails silently

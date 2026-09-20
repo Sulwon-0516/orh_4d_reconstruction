@@ -79,7 +79,7 @@ output** — DA3 predicts jointly over the group. See INSTALL_SLURM.md §0.
 
 | | |
 |---|---|
-| `orhsurf run` | the whole pipeline; `--frames`, `--gpus`, `--shard/--shards` for job arrays |
+| `orhsurf run` | the whole pipeline; `--frames`, `--gpus`, `--cpus-per-job`, `--shard/--shards` for job arrays |
 | `orhsurf verify` | opens and decompresses every array, checks dtypes/shapes/lengths |
 | `orhsurf doctor` | env, allocation, CUDA extensions, weights — one report |
 | `orhsurf fetch` | DA3 weights and/or clip data |
@@ -162,6 +162,10 @@ conventions and output format.
 > **Note:** the published HuggingFace dataset does not yet match this contract — most importantly
 > it does not ship foreground masks, which this pipeline requires. The mismatch is documented in
 > full at the top of DATA_CONTRACT.md and needs a decision before a stranger can run this.
+>
+> **Masks do not make the output foreground-only.** Training uses the unmasked RGB and export
+> validity uses opacity/depth; masks affect only the camera ordering for the DA3 prior. The
+> exported cloud is the whole scene. See DATA_CONTRACT.md.
 
 ## Layout
 

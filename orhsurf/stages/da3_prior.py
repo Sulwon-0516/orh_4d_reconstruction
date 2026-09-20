@@ -39,6 +39,10 @@ import numpy as np
 # The recipe's constants. Hardcoded and asserted, per project policy: if the data is not what this
 # was written for, stop -- do not adapt and silently produce something else.
 DA3_MODEL = "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+# Pinned commit.  fetch_ckpts.sh downloads exactly this; loading without it would consult the
+# `main` ref, which a commit-only snapshot does not create -- so an offline node with a correctly
+# pre-staged cache would fail, and an online node could silently load a different revision.
+DA3_REVISION = "b2359bdf726fb44ef62acca04d629dcf158053e7"
 PROCESS_RES = 1008
 GROUP_SIZE = 18
 GROUP_OVERLAP = 6
@@ -154,7 +158,7 @@ def run_da3_1008(manifest: dict, serials: list[str], undist_png: dict[str, Path]
                  mask_png: dict[str, Path], out_dir: Path,
                  *, model_id: str = DA3_MODEL, process_res: int = PROCESS_RES,
                  group_size: int = GROUP_SIZE, group_overlap: int = GROUP_OVERLAP,
-                 log=print) -> dict:
+                 revision: str = DA3_REVISION, log=print) -> dict:
     """Run DA3 on the undistorted frames with our poses; write <out_dir>/<serial>.npz per view.
 
     `undist_png[serial]` must be the UNDISTORTED pinhole image matching `K_undistort` -- all the
@@ -180,7 +184,11 @@ def run_da3_1008(manifest: dict, serials: list[str], undist_png: dict[str, Path]
     log(f"[da3] {len(serials)} views -> {len(groups)} group(s) of {len(groups[0])} "
         f"(overlap {group_overlap}), process_res {process_res}")
 
-    model = DepthAnything3.from_pretrained(model_id).to("cuda").eval()
+    try:
+        model = DepthAnything3.from_pretrained(model_id, revision=revision).to("cuda").eval()
+    except TypeError:                 # older DA3 wrapper without a revision kwarg
+        log(f"[da3] WARNING: this DA3 build ignores `revision`; loading {model_id} unpinned")
+        model = DepthAnything3.from_pretrained(model_id).to("cuda").eval()
     written, gmeta = {}, []
     for gi, g in enumerate(groups):
         keep = [s for s in g if owner[s] == gi]
@@ -227,7 +235,7 @@ def run_da3_1008(manifest: dict, serials: list[str], undist_png: dict[str, Path]
         del pred, depth, conf
         torch.cuda.empty_cache()
     assert set(written) == set(serials), sorted(set(serials) - set(written))
-    return dict(model=model_id, process_res=process_res, group_size=group_size,
+    return dict(model=model_id, revision=revision, process_res=process_res, group_size=group_size,
                 group_overlap=group_overlap, groups=gmeta, per_view=written)
 
 

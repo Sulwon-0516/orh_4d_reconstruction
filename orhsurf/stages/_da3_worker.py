@@ -25,6 +25,7 @@ def main() -> int:
         out_dir=Path(spec["out_dir"]),
         model_id=spec["model_id"], process_res=spec["process_res"],
         group_size=spec["group_size"], group_overlap=spec["group_overlap"],
+        revision=spec.get("revision"),
         log=lambda m: print(m, flush=True))
     Path(sys.argv[2]).write_text(json.dumps(meta, indent=1))
     return 0

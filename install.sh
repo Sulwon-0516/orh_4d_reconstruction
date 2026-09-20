@@ -82,7 +82,10 @@ if [ "$DO_ENVS" = 1 ]; then
   say "1/4  python environments"
   # COLMAP goes in the AmbiSuR env: it is needed for database_creator / image_undistorter /
   # model_converter in the dataset stage.
-  create_env "$ENV_AMBISUR" colmap
+  # COLMAP >= 3.11. NOTE: image_undistorter does NOT expose --num_threads even in 3.13.0
+  # (verified), so orhsurf bounds it by restricting the child's CPU affinity instead; the flag is
+  # probed at run time and used if a future version adds it. See _vendor/colmap_dataset.py.
+  create_env "$ENV_AMBISUR" "colmap>=3.11"
   create_env "$ENV_DA3"
 
   PA="$ENV_AMBISUR/bin/python"; PD="$ENV_DA3/bin/python"
@@ -92,7 +95,21 @@ if [ "$DO_ENVS" = 1 ]; then
   "$PA" -m pip install -q torch==2.7.1+cu128 torchvision==0.22.1+cu128 \
         --index-url https://download.pytorch.org/whl/cu128
   "$PA" -m pip install -q "numpy<2.3" "opencv-python==4.11.0.86" "scipy>=1.11" \
-        "plyfile" "tqdm" "huggingface_hub>=0.34" "safetensors" "einops" "e3nn" "Pillow"
+        "plyfile" "tqdm" "huggingface_hub>=0.34" "safetensors" "einops" "e3nn" "Pillow" \
+        "imageio" "matplotlib"
+  # imageio is NOT optional: train.py -> utils/mono_utils.py imports it at module scope, so a
+  # clean environment used to die at the first training step -- after paying for the 6.76 GB
+  # checkpoint download. Smoke-import the training dependency graph so that can never recur.
+  echo "  smoke-importing the training dependency graph"
+  ( cd "$HERE/third_party/AmbiSuR" && PYTHONPATH="$HERE:$HERE/third_party/AmbiSuR" "$PA" - <<'SMOKE'
+import importlib, sys
+for m in ("imageio", "cv2", "scipy.spatial", "plyfile", "matplotlib",
+          "utils.mono_utils", "utils.graphics_utils", "utils.general_utils",
+          "scene.cameras", "arguments"):
+    importlib.import_module(m)
+print("  [ok ] training imports resolve")
+SMOKE
+  ) || { echo "training dependency graph is incomplete (see above)"; exit 1; }
   # NOTE: pytorch3d is deliberately NOT installed. AmbiSuR imported it for exactly one function;
   # orhsurf/quat.py replaces it and tests/test_quat.py proves the two agree to 1e-15.
 
@@ -143,8 +160,7 @@ if [ "$DO_WEIGHTS" = 1 ]; then
   say "4/4  model weights"
   PD="$ENV_DA3/bin/python"
   echo "  DA3NESTED-GIANT-LARGE-1.1, 6.76 GB -> $CACHE/hf"
-  "$PD" -m orhsurf.fetch_cli 2>/dev/null || \
-    PYTHONPATH="$HERE" "$PD" -c "
+  PYTHONPATH="$HERE" HF_HOME="$CACHE/hf" "$PD" -c "
 from pathlib import Path
 from orhsurf.fetch import fetch_weights
 raise SystemExit(fetch_weights(Path('$CACHE')))"
@@ -161,14 +177,39 @@ export ORHSURF_CACHE_DIR="$CACHE"
 export ORHSURF_DATA_ROOT="\${ORHSURF_DATA_ROOT:-$HERE/data}"
 export ORHSURF_OUT_ROOT="\${ORHSURF_OUT_ROOT:-$HERE/out}"
 export PYTHONPATH="$HERE:\${PYTHONPATH:-}"
-alias orhsurf="\$ORHSURF_PYTHON -m orhsurf.cli"
+export HF_HOME="$CACHE/hf"
+export PATH="$HERE/bin:\${PATH:-}"
+# `orhsurf` is a real executable in $HERE/bin, NOT an alias: aliases are not expanded by
+# non-interactive shells, so the documented `bash -c 'source env.sh && orhsurf ...'` and every
+# sbatch script would otherwise fail with "orhsurf: command not found".
 EOF
+mkdir -p "$HERE/bin"
+cat > "$HERE/bin/orhsurf" <<'EOF'
+#!/usr/bin/env bash
+# orhsurf launcher. Resolves the interpreter from env.sh if it is not already exported.
+set -euo pipefail
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -z "${ORHSURF_PYTHON:-}" ] && [ -f "$_here/env.sh" ]; then . "$_here/env.sh"; fi
+PY="${ORHSURF_PYTHON:-$_here/env/bin/python}"
+[ -x "$PY" ] || { echo "orhsurf: no interpreter at $PY; run install.sh" >&2; exit 1; }
+export PYTHONPATH="$_here:${PYTHONPATH:-}"
+exec "$PY" -m orhsurf.cli "$@"
+EOF
+chmod +x "$HERE/bin/orhsurf"
+echo "  wrote $HERE/bin/orhsurf (executable)"
 echo "  wrote $HERE/env.sh"
 
 # shellcheck disable=SC1090
 source "$HERE/env.sh"
 "$ORHSURF_PYTHON" "$HERE/tests/test_quat.py" >/dev/null && echo "  [ok ] quaternion replacement"
-"$ORHSURF_PYTHON" -m orhsurf.cli doctor || {
+# Phase-aware: an envs-only / login-node install has no extensions, no GPU and no weights yet, so
+# the full check would always "fail" there. Each environment is checked with ITS OWN interpreter --
+# DA3 lives only in env-da3, and asking the AmbiSuR interpreter for it always failed.
+DOCTOR_PHASE="full"
+[ "$DO_EXT" = 1 ]     || DOCTOR_PHASE="envs"
+[ "$DO_WEIGHTS" = 1 ] || [ "$DOCTOR_PHASE" = "envs" ] || DOCTOR_PHASE="noweights"
+echo "  doctor phase: $DOCTOR_PHASE"
+"$ORHSURF_PYTHON" -m orhsurf.cli doctor --phase "$DOCTOR_PHASE" || {
   echo
   echo "install.sh finished but 'doctor' reports problems (above)."
   echo "Common fixes are in docs/INSTALL_SLURM.md."

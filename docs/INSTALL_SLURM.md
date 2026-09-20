@@ -57,7 +57,8 @@ Then:
 
 ```bash
 git clone <this repo> orhsurf && cd orhsurf
-./install.sh --no-weights              # on the login node: envs + deps, no compile, no download
+./install.sh --envs-only              # login node: envs + deps only. NOT --no-weights, which
+                                      # still tries to compile the CUDA extensions.
 ```
 
 `install.sh` is non-interactive and re-runnable; it skips anything already present.
@@ -195,10 +196,16 @@ both are exactly the bug described here.)
 
 ## 6. Submitting
 
-**Job array (recommended):**
+**Job array (recommended):** submit **from the repo root**, and keep the array **dense and
+zero-based** — orhsurf partitions the frame list by task index and refuses `--array=1-8`, because
+that would skip slice 0 and repartition the clip on every resubmission.
 
 ```bash
+cd /path/to/orhsurf
 sbatch --array=0-7 slurm/recon_array.sbatch C001 0-149
+# or, submitting from elsewhere:
+sbatch --export=ALL,ORHSURF_REPO=/path/to/orhsurf --array=0-7 \
+       /path/to/orhsurf/slurm/recon_array.sbatch C001 0-149
 ```
 
 Each task takes a contiguous in-order slice of the frame list and one GPU. Rationale in the header
@@ -241,8 +248,11 @@ Under Slurm, run the smoke test inside an allocation:
 
 ```bash
 srun --gres=gpu:1 --cpus-per-task=8 --mem=64G --time=1:00:00 --pty \
-     bash -c 'source env.sh && orhsurf run --clip C001 --frames 0-0 --gpus 1'
+     ./bin/orhsurf run --clip C001 --frames 0-0 --gpus 1
 ```
+
+`bin/orhsurf` is a real executable, so it works in non-interactive shells and inside `srun`.
+(It used to be a shell alias, which those never expand.)
 
 ---
 

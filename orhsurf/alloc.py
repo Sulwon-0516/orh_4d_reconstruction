@@ -79,11 +79,14 @@ def visible_gpus() -> list[int]:
         if entries and all(e.strip() == "-1" for e in entries):
             return []
         return list(range(len(entries)))
-    for var in ("SLURM_GPUS_ON_NODE", "SLURM_GPUS", "SLURM_JOB_GPUS"):
+    # SLURM_GPUS_ON_NODE is a COUNT; SLURM_JOB_GPUS is a device-ID LIST. Conflating them made
+    # SLURM_JOB_GPUS="3" mean "three GPUs" instead of "device 3".
+    v = os.environ.get("SLURM_GPUS_ON_NODE")
+    if v and v.isdigit() and int(v) > 0:
+        return list(range(int(v)))
+    for var in ("SLURM_JOB_GPUS", "SLURM_GPUS"):
         v = os.environ.get(var)
-        if v and v.isdigit() and int(v) > 0:
-            return list(range(int(v)))
-        if v and "," in v:
+        if v and v.strip():
             return list(range(len([e for e in v.split(",") if e.strip()])))
     if under_slurm():
         # Under Slurm with no GPU variable set at all, we were probably given no GPUs.  Probing
@@ -149,9 +152,9 @@ def physical_gpu_ids() -> list[int]:
             e = e.strip()
             if e == "":
                 continue
-            out.append(int(e) if e.lstrip("-").isdigit() else e)   # may be a UUID string
+            out.append(e)          # keep as a STRING: GPU-<uuid> is legal and must not be int()ed
         return out
-    return visible_gpus()
+    return [str(i) for i in visible_gpus()]
 
 
 def contiguous_slices(items: list, n_parts: int) -> list[list]:

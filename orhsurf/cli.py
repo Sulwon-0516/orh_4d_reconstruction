@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import alloc, atomicio, paths
+from . import alloc, atomicio, cpubudget, paths
 
 
 # --------------------------------------------------------------------------- helpers --
@@ -46,6 +46,19 @@ def parse_frames(spec: str) -> list[int]:
     if not out:
         raise SystemExit("--frames selected nothing")
     return sorted(set(out))
+
+
+def _run_fingerprint(manifest: Path, recipe) -> dict:
+    """What a completed frame must match for resume to accept it.
+
+    `is_done()` used to check only `complete: true`, so changing the filter parameters or swapping
+    the manifest silently produced a clip containing mutually incompatible frames.  The recipe hash
+    was already recorded in provenance and simply never compared.
+    """
+    m = Path(manifest)
+    st = m.stat()
+    return dict(recipe_hash=recipe.hash(), manifest=str(m.resolve()),
+                manifest_size=st.st_size, manifest_mtime_ns=st.st_mtime_ns)
 
 
 def _int_env(name: str):
@@ -94,8 +107,26 @@ def cmd_run(a) -> int:
     shard = a.shard if a.shard is not None else _int_env("SLURM_ARRAY_TASK_ID")
     shards = a.shards if a.shards is not None else _int_env("SLURM_ARRAY_TASK_COUNT")
     if shards and shards > 1:
+        # Slurm arrays are NOT necessarily dense or zero-based.  `--array=1-8` gives TASK_ID 1..8
+        # with COUNT 8, so slice 0 would never run and task 8 would be out of range; resubmitting
+        # a subset changes COUNT and so repartitions the clip entirely.  Refuse both rather than
+        # silently producing a different partition than the first submission.
+        lo = _int_env("SLURM_ARRAY_TASK_MIN")
+        hi = _int_env("SLURM_ARRAY_TASK_MAX")
+        if a.shard is None and lo is not None and hi is not None:
+            if lo != 0 or hi != shards - 1:
+                raise SystemExit(
+                    f"this job array is {lo}-{hi} with {shards} tasks, which is not dense and "
+                    f"zero-based.\n"
+                    f"  orhsurf partitions the frame list by task index, so a 1-based or sparse "
+                    f"array would skip slice 0 and repartition on resubmission.\n"
+                    f"  Submit as --array=0-{shards - 1}, or pass --shard/--shards explicitly "
+                    f"(keeping --shards equal to the ORIGINAL submission's task count when you "
+                    f"retry a subset).")
         if shard is None or not (0 <= shard < shards):
-            raise SystemExit(f"--shard must be in [0,{shards}), got {shard}")
+            raise SystemExit(
+                f"--shard must be in [0,{shards}), got {shard}. When retrying failed array tasks, "
+                f"keep --shards at the original count so the partition does not move.")
         all_frames = frames
         frames = alloc.contiguous_slices(frames, shards)[shard]
         print(f"[run] shard {shard}/{shards}: {len(frames)} of {len(all_frames)} frames"
@@ -105,12 +136,36 @@ def cmd_run(a) -> int:
             return 0
 
     gpus = alloc.resolve_gpus(a.gpus)
+    # One budget: the allocation divided by the number of CONCURRENT JOBS (one per GPU).
+    cpus_per_job = cpubudget.resolve(a.cpus_per_job, concurrent_jobs=len(gpus))
+    cpubudget.apply(cpus_per_job)
     out_root = Path(a.out or (paths.out_root() / clip_id)).resolve()
-    work_root = Path(a.work or (out_root / "_work")).resolve()
+    # Scratch is namespaced by clip + a run id.  It used to be keyed only by logical GPU index and
+    # frame, so two overlapping submissions built the same scene in the same directory and either
+    # one's cleanup could delete the other's live workspace.
+    run_id = os.environ.get("SLURM_JOB_ID") or f"{int(time.time())}.{os.getpid()}"
+    if os.environ.get("SLURM_ARRAY_TASK_ID"):
+        run_id += f".{os.environ['SLURM_ARRAY_TASK_ID']}"
+    work_root = Path(a.work).resolve() if a.work else (out_root / "_work" / run_id)
     out_root.mkdir(parents=True, exist_ok=True)
     recipe = recipe_from_args(a)
 
-    todo = frames if a.force else [f for f in frames if not atomicio.is_done(out_root / f"{f:05d}")]
+    atomicio.recover_interrupted(out_root)
+    fp = _run_fingerprint(manifest, recipe)
+    if a.force:
+        todo = frames
+    else:
+        todo, stale = [], []
+        for f in frames:
+            state = atomicio.frame_state(out_root / f"{f:05d}", fp)
+            if state == "done":
+                continue
+            if state == "mismatch":
+                stale.append(f)
+            todo.append(f)
+        if stale:
+            print(f"[run] {len(stale)} frame(s) exist but were built with a DIFFERENT recipe or "
+                  f"manifest and will be rebuilt: {stale[:8]}{'...' if len(stale) > 8 else ''}")
     print(f"[run] clip {clip_id}")
     print(f"[run] {len(frames)} frames, {len(frames)-len(todo)} already done, {len(todo)} to run")
     print(f"[run] {len(gpus)} GPU(s) {gpus}, one job per GPU, -r {recipe.resolution} "
@@ -119,9 +174,15 @@ def cmd_run(a) -> int:
           f"nn-max-mm {recipe.nn_max_mm}")
     print(f"[run] out  {out_root}")
     alloc_info = alloc.describe()
-    print(f"[run] cpus {alloc_info['cpu_count']} (from {alloc_info['cpu_source']})"
+    print(f"[run] cpus {cpus_per_job}/job x {len(gpus)} job(s) "
+          f"of {cpubudget.allocation_cpus()} allocated"
           + (" [slurm]" if alloc_info["under_slurm"] else ""))
 
+    if not a.dry_run:
+        atomicio.atomic_write_json(out_root / "_EXPECTED.json", dict(
+            clip=clip_id, frames=frames, recipe_hash=recipe.hash(),
+            manifest=str(manifest), cpus_per_job=cpus_per_job,
+            created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
     if a.dry_run:
         for i, part in enumerate(alloc.contiguous_slices(todo, len(gpus))):
             print(f"  gpu {gpus[i]}: {len(part)} frames"
@@ -131,7 +192,7 @@ def cmd_run(a) -> int:
     t0 = time.time()
     rc = 0
     if todo:
-        rc = _dispatch(todo, gpus, manifest, out_root, work_root, recipe, a)
+        rc = _dispatch(todo, gpus, manifest, out_root, work_root, recipe, a, cpus_per_job, fp)
     el = time.time() - t0
     print(f"[run] reconstruction finished in {el/60:.1f} min (rc={rc})")
 
@@ -154,15 +215,13 @@ def cmd_run(a) -> int:
     return rc
 
 
-def _dispatch(todo, gpus, manifest, out_root, work_root, recipe, a) -> int:
+def _dispatch(todo, gpus, manifest, out_root, work_root, recipe, a, cpus_per_job,
+              _fingerprint=None) -> int:
     """One worker subprocess per GPU, each given a contiguous in-order slice of the frame list."""
     parts = alloc.contiguous_slices(todo, len(gpus))
     # Translate our logical GPU indices to absolute device ids before handing them to children.
     phys = alloc.physical_gpu_ids()
-    cpus_total = alloc.cpu_count()
-    # Never let the workers collectively claim more CPU than we were allocated.  8 is what one
-    # AmbiSuR training actually uses (~280% CPU measured), so more does not help anyway.
-    per = max(1, min(8, cpus_total // max(1, len(gpus))))
+    per = cpus_per_job
     logdir = out_root / "_logs"
     logdir.mkdir(parents=True, exist_ok=True)
 
@@ -175,14 +234,20 @@ def _dispatch(todo, gpus, manifest, out_root, work_root, recipe, a) -> int:
         cmd = [sys.executable, "-m", "orhsurf.cli", "_worker",
                "--manifest", str(manifest), "--frames", spec, "--gpu", str(dev),
                "--out", str(out_root), "--work", str(work_root / f"gpu{gpu}"),
-               "--cpus", str(per), "--recipe-json", json.dumps(_recipe_json(recipe))]
+               "--cpus", str(per), "--recipe-json", json.dumps(_recipe_json(recipe)),
+               "--fingerprint", json.dumps(_fingerprint)]
         if a.keep_work:
             cmd.append("--keep-work")
+        if a.force:
+            cmd.append("--force")          # previously never reached the worker, so --force was a no-op
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(
             filter(None, [str(paths.REPO_ROOT), os.environ.get("PYTHONPATH", "")])))
         # absolute id, so the child does not re-resolve it against our restricted list
         env["CUDA_VISIBLE_DEVICES"] = str(dev)
-        log = logdir / f"gpu{gpu}.log"
+        # Include job/task/pid: every single-GPU array task used to truncate the same gpu0.log.
+        tag = "_".join(str(x) for x in filter(None, (
+            os.environ.get("SLURM_JOB_ID"), os.environ.get("SLURM_ARRAY_TASK_ID"))))
+        log = logdir / (f"gpu{dev}{('_' + tag) if tag else ''}_{os.getpid()}.log")
         print(f"[run] gpu {dev}: {len(part)} frames {part[0]:05d}..{part[-1]:05d} -> {log}")
         procs.append((dev, subprocess.Popen(cmd, stdout=open(log, "w"),
                                             stderr=subprocess.STDOUT, env=env), log))
@@ -215,25 +280,32 @@ def cmd_worker(a) -> int:
 
     out_root, work_root = Path(a.out), Path(a.work)
     frames = parse_frames(a.frames)
+    fp = json.loads(a.fingerprint) if a.fingerprint else None
     failed = []
     for f in frames:
         out_dir = out_root / f"{f:05d}"
-        if atomicio.is_done(out_dir):
+        # --force used to stop at the parent: the worker skipped completed frames regardless, so
+        # `--force` was a no-op end to end.
+        if not a.force and atomicio.frame_state(out_dir, fp) == "done":
             print(f"[gpu{a.gpu}] frame {f:05d} already done, skipping", flush=True)
             continue
         wd = work_root / f"{f:05d}"
         try:
             run_frame(Path(a.manifest), f, out_dir, wd, r, gpu=a.gpu, cpus=a.cpus,
-                      log=lambda m: print(m, flush=True))
+                      fingerprint=fp, log=lambda m: print(m, flush=True))
         except Exception as e:
             print(f"[gpu{a.gpu}] frame {f:05d} FAILED: {type(e).__name__}: {e}", flush=True)
             import traceback
             traceback.print_exc()
             failed.append(f)
         finally:
-            if not a.keep_work:
+            # Keep scratch when the frame FAILED: it holds the trained model and the DA3 depths,
+            # which are ~13 min of GPU time, and the logs needed to diagnose the failure.
+            if not a.keep_work and f not in failed:
                 import shutil
                 shutil.rmtree(wd, ignore_errors=True)
+            elif f in failed:
+                print(f"[gpu{a.gpu}] kept scratch for diagnosis: {wd}", flush=True)
     if failed:
         print(f"[gpu{a.gpu}] {len(failed)} frame(s) failed: {failed}", flush=True)
         return 1
@@ -246,8 +318,12 @@ def cmd_verify(a) -> int:
         root = paths.out_root() / a.clip
     rep = atomicio.verify_tree(root, deep=not a.shallow)
     print(f"[verify] {root}")
-    print(f"[verify] {rep['n_ok']}/{rep['n_frames']} frames ok, "
+    exp = f" (expected {rep['expected']})" if rep.get("expected") is not None else \
+          "  [no _EXPECTED.json: only frames already on disk were checked]"
+    print(f"[verify] {rep['n_ok']}/{rep['n_frames']} frames ok{exp}, "
           f"{rep['total_points']:,} points total")
+    if rep.get("missing"):
+        print(f"  MISSING (never published): {rep['missing']}")
     for bad in rep["bad"]:
         print(f"  BAD {bad['frame']}:")
         for p in bad["problems"]:
@@ -258,7 +334,16 @@ def cmd_verify(a) -> int:
 
 
 def cmd_doctor(a) -> int:
-    """Report everything missing at once, rather than failing one stage at a time."""
+    """Report everything missing at once, rather than failing one stage at a time.
+
+    Phase-aware: `envs` (login node, nothing compiled), `noweights`, or `full`.  Each environment
+    is probed with ITS OWN interpreter -- DA3 lives only in env-da3, so asking the AmbiSuR
+    interpreter for it reported a failure on every correct install.
+    """
+    phase = getattr(a, "phase", "full") or "full"
+    want_ext = phase == "full"
+    want_gpu = phase == "full"
+    want_weights = phase == "full"
     ok = True
 
     def check(label, good, detail=""):
@@ -272,7 +357,9 @@ def cmd_doctor(a) -> int:
     print(f"  data root {paths.data_root()}")
     print(f"  out root  {paths.out_root()}")
     info = alloc.describe()
-    print(f"  cpus      {info['cpu_count']} (from {info['cpu_source']})")
+    cb = cpubudget.describe()
+    print(f"  cpus      budget {cb['cpus_per_job']}/job of {cb['allocation_cpus']} allocated "
+          f"(source: {cb['source']}); OMP_NUM_THREADS={cb['thread_vars']['OMP_NUM_THREADS']}")
     print(f"  gpus      {info['visible_gpus']} (from {info['gpu_source']})"
           + ("  [slurm]" if info["under_slurm"] else ""))
 
@@ -285,8 +372,11 @@ def cmd_doctor(a) -> int:
     try:
         import torch
         check(f"torch {torch.__version__}", True)
-        check("CUDA available", torch.cuda.is_available(),
-              "" if torch.cuda.is_available() else "no usable GPU in this allocation")
+        if want_gpu:
+            check("CUDA available", torch.cuda.is_available(),
+                  "" if torch.cuda.is_available() else "no usable GPU in this allocation")
+        elif not torch.cuda.is_available():
+            print(f"  [skip] GPU checks (phase={phase}; a login node normally has no GPU)")
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 p = torch.cuda.get_device_properties(i)
@@ -296,18 +386,31 @@ def cmd_doctor(a) -> int:
     except Exception as e:
         check("torch import", False, f"{type(e).__name__}: {e}")
 
-    for mod in ("cv2", "scipy", "numpy", "depth_anything_3"):
+    for mod in ("cv2", "scipy", "numpy", "imageio", "plyfile"):
         try:
             __import__(mod)
-            check(f"import {mod}", True)
+            check(f"import {mod} (ambisur env)", True)
         except Exception as e:
-            check(f"import {mod}", False, f"{type(e).__name__}: {e}")
-    for ext in ("diff_plane_rasterization_ambisur", "simple_knn._C"):
-        try:
-            __import__(ext)
-            check(f"CUDA extension {ext}", True)
-        except Exception as e:
-            check(f"CUDA extension {ext}", False, f"{type(e).__name__}: {e}")
+            check(f"import {mod} (ambisur env)", False, f"{type(e).__name__}: {e}")
+    # DA3 is installed ONLY in env-da3; probe it with that interpreter.
+    da3_py = paths.da3_python()
+    if da3_py.is_file():
+        r = subprocess.run([str(da3_py), "-c",
+                            "import depth_anything_3, torch; print(torch.__version__)"],
+                           capture_output=True, text=True)
+        check(f"import depth_anything_3 (da3 env, {da3_py.name})", r.returncode == 0,
+              (r.stdout or r.stderr).strip().splitlines()[-1] if (r.stdout or r.stderr) else "")
+    else:
+        check(f"DA3 interpreter at {da3_py}", False, "run install.sh")
+    if want_ext:
+        for ext in ("diff_plane_rasterization_ambisur", "simple_knn._C"):
+            try:
+                __import__(ext)
+                check(f"CUDA extension {ext}", True)
+            except Exception as e:
+                check(f"CUDA extension {ext}", False, f"{type(e).__name__}: {e}")
+    else:
+        print(f"  [skip] CUDA extensions (phase={phase})")
     try:
         from .quat import quaternion_to_matrix
         import torch as _t
@@ -320,8 +423,11 @@ def cmd_doctor(a) -> int:
         check("quaternion_to_matrix", False, f"{type(e).__name__}: {e}")
 
     ck = paths.cache_dir() / "hf/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1"
-    check(f"DA3 checkpoint cached ({ck})", ck.is_dir(),
-          "" if ck.is_dir() else "run: orhsurf fetch --weights   (6.76 GB)")
+    if want_weights:
+        check(f"DA3 checkpoint cached ({ck})", ck.is_dir(),
+              "" if ck.is_dir() else "run: ./fetch_ckpts.sh   (6.76 GB)")
+    else:
+        print(f"  [skip] weights (phase={phase})")
     print("\n" + ("all checks passed" if ok else "SOME CHECKS FAILED (see above)"))
     return 0 if ok else 1
 
@@ -366,6 +472,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--keep-work", action="store_true", help="keep per-frame scratch for debugging")
     r.add_argument("--force", action="store_true", help="redo frames that are already complete")
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--cpus-per-job", type=int, default=None, dest="cpus_per_job",
+                   help="CPU budget for EACH concurrent job. Default: the allocation divided by "
+                        "the number of GPUs. Applied to OMP/MKL/BLAS before any numeric import, "
+                        "to torch, to the k-NN gate and to COLMAP.")
     r.add_argument("--shard", type=int, default=None,
                    help="Slurm job arrays: this task's index. Takes the SHARD-th contiguous slice "
                         "of the frame list. Defaults to SLURM_ARRAY_TASK_ID.")
@@ -390,12 +500,14 @@ def build_parser() -> argparse.ArgumentParser:
     w = sub.add_parser("_worker", help=argparse.SUPPRESS)
     w.add_argument("--manifest", required=True)
     w.add_argument("--frames", required=True)
-    w.add_argument("--gpu", type=int, required=True)
+    w.add_argument("--gpu", required=True)   # str: may be a GPU-<uuid>, not only an index
     w.add_argument("--out", required=True)
     w.add_argument("--work", required=True)
     w.add_argument("--cpus", type=int, default=8)
     w.add_argument("--recipe-json", required=True)
     w.add_argument("--keep-work", action="store_true")
+    w.add_argument("--force", action="store_true")
+    w.add_argument("--fingerprint", default=None)
     w.set_defaults(fn=cmd_worker)
 
     v = sub.add_parser("verify", help="open every output and check it (use after any interruption)")
@@ -406,6 +518,9 @@ def build_parser() -> argparse.ArgumentParser:
     v.set_defaults(fn=cmd_verify)
 
     d = sub.add_parser("doctor", help="check the install and the allocation")
+    d.add_argument("--phase", choices=("envs", "noweights", "full"), default="full",
+                   help="envs: login node, nothing compiled yet; full: everything (default)")
+    d.add_argument("--cpus-per-job", type=int, default=None, dest="cpus_per_job")
     d.set_defaults(fn=cmd_doctor)
 
     f = sub.add_parser("fetch", help="download model weights and/or a clip")
@@ -425,9 +540,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    # Thread limits must be set before numpy/torch are imported anywhere downstream.
-    alloc.apply_thread_limits()
     a = build_parser().parse_args(argv)
+    # ONE CPU budget, resolved and applied BEFORE anything numeric is imported downstream.
+    # The old code applied the whole allocation here, so every per-GPU worker re-claimed all 64
+    # cores before it had even parsed its own, smaller --cpus.  See orhsurf/cpubudget.py.
+    if getattr(a, "cmd", None) == "_worker":
+        cpubudget.apply(a.cpus)                      # the parent already divided the allocation
+    elif getattr(a, "cpus_per_job", None) is not None:
+        cpubudget.apply(cpubudget.resolve(a.cpus_per_job))
+    # For `run`, the budget depends on how many GPUs we end up using, so cmd_run resolves it once
+    # it knows; for the read-only commands the default is fine.
     return a.fn(a)
 
 

@@ -46,7 +46,7 @@ from lanes_io import write_frame                           # noqa: E402
 from colmap_dataset import read_model_txt           # noqa: E402
 
 
-def normals_from_grid(Xw, valid):
+def normals_from_grid(Xw, valid, centre=None):
     """World-frame normals from the backprojected (H,W,3) grid via central differences; unit length, 0 where
     the 4-neighbourhood is not fully valid."""
     H, W, _ = Xw.shape
@@ -56,6 +56,13 @@ def normals_from_grid(Xw, valid):
     c = torch.cross(dx, dy, dim=-1)
     ok = (valid[1:-1, 2:] & valid[1:-1, :-2] & valid[2:, 1:-1] & valid[:-2, 1:-1] & valid[1:-1, 1:-1])
     c = c / (c.norm(dim=-1, keepdim=True) + 1e-12)
+    # Orient towards the producing camera.  cross(dx, dy) on a frontoparallel patch in OpenCV
+    # camera axes points along +Z, i.e. AWAY from the camera, so without this flip every exported
+    # normal was back-facing -- the module docstring promised the flip but the code never did it.
+    # The shaded debug render used abs(n.z) and so could not reveal it.
+    if centre is not None:
+        v = centre.reshape(1, 1, 3) - Xw[1:-1, 1:-1]
+        c = torch.where(((c * v).sum(-1, keepdim=True) < 0), -c, c)
     n[1:-1, 1:-1] = c * ok[..., None]
     return n
 
@@ -138,7 +145,11 @@ def main():
             valid = (d > 0) & (alpha > args.alpha_min) & torch.isfinite(d)
             per_view.append(dict(serial=serial, d=d, valid=valid, Xw=Xw, rgb=gt.permute(1, 2, 0).float(),
                                  R=Rt, T=Tt, Fx=float(v.Fx), Fy=float(v.Fy), Cx=float(v.Cx), Cy=float(v.Cy),
-                                 H=H, W=W, n=normals_from_grid(Xw, valid),
+                                 H=H, W=W,
+                                 n=normals_from_grid(
+                                     Xw, valid,
+                                     torch.tensor(np.array(v.R) @ -np.array(v.T),
+                                                  dtype=torch.float32, device=dev)),
                                  centre=torch.tensor(np.array(v.R) @ -np.array(v.T), dtype=torch.float32, device=dev)))
             print(f"  {serial}: {int(valid.sum()):,}/{H*W:,} valid px, depth "
                   f"{float(d[valid].min()):.3f}..{float(d[valid].max()):.3f} m", flush=True)
@@ -192,7 +203,12 @@ def main():
         span = key.max(0).values + 1
         lin = key[:, 0] * (span[1] * span[2]) + key[:, 1] * span[2] + key[:, 2]
         del key
-        order = torch.argsort(lin * 64 - sup.to(torch.int64))        # same voxel -> highest support first
+        # Lexicographic (voxel asc, support desc) via a STABLE two-pass sort.  The old key
+        # `lin*64 - sup` assumed support < 64; with 47 cameras that held, but a larger rig would
+        # let adjacent voxels interleave and a voxel could keep several representatives, changing
+        # the k-NN density the isolation gate then measures.  Two stable sorts cannot alias.
+        order = torch.argsort(-sup.to(torch.int64), stable=True)
+        order = order[torch.argsort(lin[order], stable=True)]
         lin_s = lin[order]
         first = torch.ones_like(lin_s, dtype=torch.bool)
         first[1:] = lin_s[1:] != lin_s[:-1]
@@ -210,7 +226,8 @@ def main():
     if nn_on:
         from scipy.spatial import cKDTree
         t_nn = time.time()
-        dist, _ = cKDTree(xyz_n).query(xyz_n, k=args.nn_k + 1, workers=8)
+        _nn_workers = int(os.environ.get("ORHSURF_CPUS_PER_JOB", "8"))
+        dist, _ = cKDTree(xyz_n).query(xyz_n, k=args.nn_k + 1, workers=_nn_workers)
         dk_mm = dist[:, args.nn_k] * 1000.0            # column 0 is the point itself
         iso = dk_mm > args.nn_max_mm
         mv = sup_n < args.min_views

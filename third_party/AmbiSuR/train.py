@@ -579,7 +579,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    torch.set_num_threads(8)
+    torch.set_num_threads(int(os.environ.get("ORHSURF_CPUS_PER_JOB", "8")))  # orhsurf: one budget
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)

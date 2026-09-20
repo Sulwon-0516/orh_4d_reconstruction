@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
-from . import atomicio, paths
+from . import atomicio, cpubudget, paths
 from .stages import da3_prior, prep as prep_stage
 
 
@@ -43,6 +43,7 @@ class Recipe:
     multi_view_min_dis: float = 0.01
     # --- DA3 prior ---
     da3_model: str = da3_prior.DA3_MODEL
+    da3_revision: str = da3_prior.DA3_REVISION   # pinned: fetch and load must agree
     process_res: int = da3_prior.PROCESS_RES
     group_size: int = da3_prior.GROUP_SIZE
     group_overlap: int = da3_prior.GROUP_OVERLAP
@@ -103,7 +104,8 @@ def _run_da3_subprocess(manifest_path: Path, serials, prep_info, work_dir: Path,
         mask={s: str(prep_info[s]["mask"]) for s in serials},
         out_dir=str(work_dir / "native/da3"),
         model_id=recipe.da3_model, process_res=recipe.process_res,
-        group_size=recipe.group_size, group_overlap=recipe.group_overlap)))
+        group_size=recipe.group_size, group_overlap=recipe.group_overlap,
+        revision=recipe.da3_revision)))
     da3_env = dict(env)
     # The DA3 env has its own site-packages; do not leak the AmbiSuR repo onto its PYTHONPATH.
     da3_env["PYTHONPATH"] = str(paths.REPO_ROOT)
@@ -112,7 +114,12 @@ def _run_da3_subprocess(manifest_path: Path, serials, prep_info, work_dir: Path,
     # an OTHERWISE EMPTY card. expandable_segments lets the allocator grow one segment instead of
     # stranding blocks, which is what makes this fit at all. It changes allocation strategy only,
     # not arithmetic, so the depths are unaffected.
-    da3_env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # MERGE rather than setdefault: an unrelated existing PYTORCH_CUDA_ALLOC_CONF (e.g. a site
+    # default setting max_split_size_mb) would otherwise suppress the one setting that makes the
+    # 18-view group fit in 24 GB at all.
+    _cur = da3_env.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if "expandable_segments" not in _cur:
+        da3_env["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(x for x in (_cur, "expandable_segments:True") if x)
     _check([da3_py, "-m", "orhsurf.stages._da3_worker", spec_p, res_p],
            cwd=paths.REPO_ROOT, env=da3_env, log_path=logs / "da3.log",
            label="DA3 1008 prior")
@@ -123,14 +130,17 @@ def _run_da3_subprocess(manifest_path: Path, serials, prep_info, work_dir: Path,
 
 
 def run_frame(manifest_path: Path, frame_index: int, out_dir: Path, work_dir: Path,
-              recipe: Recipe, *, gpu: int = 0, cpus: int = 8, log=print) -> dict:
+              recipe: Recipe, *, gpu: int = 0, cpus: int = 8, fingerprint: dict | None = None,
+              log=print) -> dict:
     """Reconstruct ONE frame. Returns the provenance dict that was written into the output.
 
     `out_dir`   final per-frame directory (created atomically at the very end)
     `work_dir`  scratch for this frame: undistorted images, COLMAP workspace, scene, model.
                 Large (~GBs) and safe to delete once the frame is done.
     """
+    cpubudget.apply(cpus)          # env first...
     import numpy as np
+    cpubudget.bind_torch(cpus)     # ...then torch/cv2 explicitly, since env alone is advisory
 
     manifest_path, out_dir, work_dir = Path(manifest_path), Path(out_dir), Path(work_dir)
     env = paths.subprocess_env(gpu=gpu, cpus=cpus)
@@ -188,7 +198,7 @@ def run_frame(manifest_path: Path, frame_index: int, out_dir: Path, work_dir: Pa
         iterations=recipe.iterations, resolution=recipe.resolution)
 
     # ---- 5. export + filter, into a staging dir that is swapped in only when complete -------
-    with atomicio.FrameStage(out_dir) as st:
+    with atomicio.FrameStage(out_dir, fingerprint=fingerprint) as st:
         tl.run("export", lambda: _check(
             [py, paths.vendor_dir() / "export_surface.py", "-s", scene, "-m", model,
              "--iteration", recipe.iterations, "--out", st.path,
@@ -214,6 +224,8 @@ def run_frame(manifest_path: Path, frame_index: int, out_dir: Path, work_dir: Pa
             recipe_hash=recipe.hash(), manifest=str(manifest_path),
             n_cameras=len(serials), heldout=list(heldout),
             n_points=n, stages=tl.stages,
+            cpu_budget=cpubudget.describe(),     # what actually applied, not what was requested
+            da3_revision=recipe.da3_revision,
             da3=da3_meta | {"rewarp": rewarp_meta},
             export=surf,
         )

@@ -277,6 +277,49 @@ def read_alpha_mask(path):
 
 
 # ------------------------------------------------------------------ build ---
+
+_NUM_THREADS_SUPPORT = {}
+
+
+def _colmap_supports_num_threads(colmap_bin) -> bool:
+    """Does THIS colmap's image_undistorter accept --num_threads? Probed once, then cached."""
+    key = str(colmap_bin)
+    if key not in _NUM_THREADS_SUPPORT:
+        try:
+            h = subprocess.run([key, "image_undistorter", "-h"], capture_output=True, text=True,
+                               timeout=60)
+            _NUM_THREADS_SUPPORT[key] = "--num_threads" in (h.stdout + h.stderr)
+        except Exception:
+            _NUM_THREADS_SUPPORT[key] = False
+    return _NUM_THREADS_SUPPORT[key]
+
+
+def _affinity_limiter(n):
+    """preexec_fn restricting the child to `n` CPUs taken from our own affinity mask.
+
+    Returns None where that is impossible or inadvisable:
+      * non-Linux (no sched_setaffinity),
+      * inside a Slurm allocation, where the cpuset cgroup is already the real bound and narrowing
+        further duplicates -- or fights -- the scheduler's own binding.
+    """
+    if not hasattr(os, "sched_setaffinity") or os.environ.get("SLURM_JOB_ID"):
+        return None
+    try:
+        mask = sorted(os.sched_getaffinity(0))
+    except OSError:
+        return None
+    if n >= len(mask):
+        return None
+    keep = set(mask[:n])
+
+    def _set():
+        try:
+            os.sched_setaffinity(0, keep)
+        except OSError:
+            pass
+    return _set
+
+
 def build_dataset(manifest_path, frame_index, ws, heldout=(), colmap_bin=COLMAP_BIN, timeline=None,
                   force=False, fg_mask_dir=None):
     ws = Path(ws); ws.mkdir(parents=True, exist_ok=True)
@@ -336,12 +379,27 @@ def build_dataset(manifest_path, frame_index, ws, heldout=(), colmap_bin=COLMAP_
     und = ws / "undist"
     if und.exists() and force:
         shutil.rmtree(und)
-    cmd = [str(colmap_bin), "image_undistorter", "--image_path", str(img_dir), "--input_path", str(model_dir),
+    cmd = [str(colmap_bin), "image_undistorter",
+           "--image_path", str(img_dir), "--input_path", str(model_dir),
            "--output_path", str(und), "--output_type", "COLMAP", "--max_image_size", "-1"]
+    # orhsurf: bound COLMAP to the one CPU budget.
+    #
+    # COLMAP sizes its thread pool from hardware concurrency, so on a 64-core shared box it will
+    # happily use all of it.  MEASURED on COLMAP 3.13.0: `image_undistorter` does NOT accept
+    # `--num_threads` ("Failed to parse options - unrecognised option: --num_threads"), so the
+    # flag is PROBED rather than assumed, and when it is absent we restrict the CHILD'S CPU
+    # AFFINITY instead.  Affinity is the stronger guarantee anyway: however many threads COLMAP
+    # starts, it can only occupy the cores we granted it.
+    _nt = int(os.environ.get("ORHSURF_CPUS_PER_JOB", "8"))
+    if _colmap_supports_num_threads(colmap_bin):
+        cmd = cmd[:2] + ["--num_threads", str(_nt)] + cmd[2:]
+        _pre = None
+    else:
+        _pre = _affinity_limiter(_nt)
     if timeline is not None:
         timeline.run("dataset_image_undistorter", cmd)
     else:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, preexec_fn=_pre)
     assert (und / "sparse").exists(), f"image_undistorter produced no sparse model in {und}"
     txt = model_to_txt(colmap_bin, und / "sparse", und / "sparse_txt")
     ucams, uimgs = read_model_txt(txt)

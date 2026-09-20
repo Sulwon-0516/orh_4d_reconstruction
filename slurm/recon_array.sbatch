@@ -37,7 +37,21 @@ set -euo pipefail
 CLIP="${1:?usage: sbatch --array=0-N slurm/recon_array.sbatch <CLIP_ID> [FRAMES]}"
 FRAMES="${2:-0-149}"
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Slurm copies this file to its spool directory and runs it from there, so BASH_SOURCE points at
+# the spool, NOT at the checkout. Resolve the repo explicitly, in this order:
+#   $ORHSURF_REPO  ->  $SLURM_SUBMIT_DIR (if it looks like the checkout)  ->  hard failure.
+if [ -n "${ORHSURF_REPO:-}" ]; then
+  REPO="$ORHSURF_REPO"
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "$SLURM_SUBMIT_DIR/orhsurf/cli.py" ]; then
+  REPO="$SLURM_SUBMIT_DIR"
+else
+  echo "[orhsurf] cannot locate the checkout." >&2
+  echo "  Submit FROM the repo root, or export ORHSURF_REPO=/path/to/orhsurf first:" >&2
+  echo "    sbatch --export=ALL,ORHSURF_REPO=/path/to/orhsurf ..." >&2
+  exit 2
+fi
+[ -f "$REPO/orhsurf/cli.py" ] || { echo "[orhsurf] $REPO is not an orhsurf checkout" >&2; exit 2; }
+[ -f "$REPO/env.sh" ] || { echo "[orhsurf] $REPO/env.sh missing; run install.sh first" >&2; exit 2; }
 mkdir -p "$REPO/slurm_logs"
 cd "$REPO"
 
@@ -70,10 +84,11 @@ echo "[orhsurf] clip=$CLIP frames=$FRAMES cpus=${SLURM_CPUS_PER_TASK:-?} CUDA_VI
 # NOTE: no `taskset` anywhere. Inside a Slurm cpuset cgroup taskset can only narrow an already
 # narrow mask and fails outright if the mask does not intersect the cgroup. Binding is srun's job.
 srun --cpu-bind=cores \
-  "$ORHSURF_PYTHON" -m orhsurf.cli run \
+  "$REPO/bin/orhsurf" run \
     --clip "$CLIP" \
     --frames "$FRAMES" \
     --gpus 1 \
+    --cpus-per-job "${SLURM_CPUS_PER_TASK:-8}" \
     --shard "$TASK_ID" --shards "$TASK_COUNT"
 
 echo "[orhsurf] task ${TASK_ID} finished rc=$?"

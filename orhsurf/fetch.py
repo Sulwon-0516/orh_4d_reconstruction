@@ -25,13 +25,23 @@ def _placeholder(repo: str) -> bool:
 
 
 def fetch_weights(cache: Path) -> int:
-    from huggingface_hub import snapshot_download
+    """Download the pinned DA3 snapshot into OUR cache.
+
+    `cache_dir=` is passed explicitly rather than relying on HF_HOME: huggingface_hub reads its
+    environment at IMPORT time, so setting HF_HOME after the import had no effect and the download
+    could land in $HOME/.cache (or fail outright on a read-only home) while the pipeline's own
+    cache stayed empty.
+    """
     hf = Path(cache) / "hf"
-    hf.mkdir(parents=True, exist_ok=True)
-    os.environ["HF_HOME"] = str(hf)
-    print(f"[fetch] {DA3_REPO}@{DA3_REVISION[:8]} (6.76 GB) -> {hf}")
-    p = snapshot_download(repo_id=DA3_REPO, revision=DA3_REVISION)
+    hub = hf / "hub"
+    hub.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(hf))
+    from huggingface_hub import snapshot_download
+    print(f"[fetch] {DA3_REPO}@{DA3_REVISION[:8]} (6.76 GB) -> {hub}")
+    p = snapshot_download(repo_id=DA3_REPO, revision=DA3_REVISION, cache_dir=str(hub))
     print(f"[fetch] weights at {p}")
+    print("[fetch] NOTE: inference loads this same revision explicitly "
+          "(orhsurf/stages/da3_prior.py::DA3_REVISION), so an offline snapshot works.")
     return 0
 
 

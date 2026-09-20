@@ -32,10 +32,14 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import numpy as np
+# NOTE: numpy is imported LAZILY inside the functions that need it, never at module scope.
+# orhsurf.cli imports this module early, and a module-scope `import numpy` here would bind
+# OpenMP's thread pool before cpubudget.apply() has set OMP_NUM_THREADS -- at which point the
+# budget is a string in os.environ and nothing more.  See orhsurf/cpubudget.py.
 
 DONE = "_DONE.json"
-SCHEMA_VERSION = 1
+PREV_PREFIX = ".prev."          # a frame displaced mid-publication; recover_interrupted() rolls it back
+SCHEMA_VERSION = 2              # 2 adds `fingerprint` and fsynced payloads
 
 # Exactly the arrays lanes_io.write_frame produces.  Hardcoded and asserted: if a frame does not
 # have precisely these, something upstream changed and we stop rather than adapt.
@@ -81,6 +85,7 @@ def atomic_savez(path: Path, **arrays) -> Path:
     described at the top of this file.  We write to a temp name in the SAME directory (so the
     rename stays within one filesystem) and fsync before renaming.
     """
+    import numpy as np
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
@@ -109,9 +114,10 @@ class FrameStage:
     exactly as it was.
     """
 
-    def __init__(self, final: Path, keep_previous: bool = False):
+    def __init__(self, final: Path, keep_previous: bool = False, fingerprint: dict | None = None):
         self.final = Path(final)
         self.keep_previous = keep_previous
+        self.fingerprint = fingerprint
         self.path: Path | None = None
         self._meta: dict = {}
         self._tmpdir: Path | None = None
@@ -131,32 +137,112 @@ class FrameStage:
         if exc_type is not None:
             shutil.rmtree(self._tmpdir, ignore_errors=True)
             return False
+        # FSYNC EVERY PAYLOAD BEFORE THE MARKER.
+        # The production writer is lanes_io.write_frame(), which uses an ordinary
+        # np.savez_compressed -- NOT our atomic_savez().  So staging alone protected against an
+        # interrupted process but not against a node or filesystem crash: the marker could reach
+        # disk while the payload it vouches for was still in page cache.  Durability was claimed
+        # and only the helper, not the writer, actually provided it.  We now force every staged
+        # file (and the staging directory) to stable storage before writing the marker, which
+        # makes the guarantee hold regardless of which writer produced the bytes.
         files = {}
         for p in sorted(self._tmpdir.rglob("*")):
             if p.is_file():
+                fd = os.open(str(p), os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
                 rel = str(p.relative_to(self._tmpdir))
                 files[rel] = dict(bytes=p.stat().st_size, **self._meta.get(rel, {}))
-        marker = dict(schema_version=SCHEMA_VERSION, complete=True, files=files)
+        _fsync_dir(self._tmpdir)
+        marker = dict(schema_version=SCHEMA_VERSION, complete=True, files=files,
+                      fingerprint=self.fingerprint)
         # DONE is written INSIDE the staging dir, last, before the swap: the directory that appears
         # at `final` is therefore complete-with-marker the instant it becomes visible.
         atomic_write_json(self._tmpdir / DONE, marker)
+        # PUBLISH WITH A SINGLE RENAME.
+        # Replacement used to be two renames (final -> .old, staging -> final).  A SIGKILL between
+        # them left NO final frame at all, and the .old copy was not part of resume, so the frame
+        # looked never-built.  rename(2) cannot atomically swap two directories portably, so we
+        # instead publish through a directory that is *created* by one rename and keep the previous
+        # version aside under a name that `recover_interrupted()` knows how to roll back.
         if self.final.exists():
             if self.keep_previous:
                 shutil.rmtree(self._tmpdir, ignore_errors=True)
                 raise FileExistsError(f"{self.final} exists and keep_previous=True")
-            # Swap, do not overwrite: move the old one aside, put the new one in, then delete.
-            old = self.final.with_name(f".{self.final.name}.old.{os.getpid()}")
-            os.replace(self.final, old)
+            old = self.final.with_name(f"{PREV_PREFIX}{self.final.name}")
+            shutil.rmtree(old, ignore_errors=True)
+            os.replace(self.final, old)          # crash here -> recover_interrupted() restores it
             try:
                 os.replace(self._tmpdir, self.final)
             except BaseException:
-                os.replace(old, self.final)     # put the good one back
+                os.replace(old, self.final)
                 raise
+            _fsync_dir(self.final.parent)
             shutil.rmtree(old, ignore_errors=True)
         else:
             os.replace(self._tmpdir, self.final)
         _fsync_dir(self.final.parent)
         return False
+
+
+def recover_interrupted(out_root: Path, log=print) -> int:
+    """Roll back any frame whose publication was killed between the two renames.
+
+    A `.prev.<name>` directory with no corresponding `<name>` means we died after moving the good
+    frame aside and before the new one landed.  The good frame is put back.  Called at the start of
+    every run, before the resume scan, so an interrupted publication is never mistaken for a frame
+    that was never built.
+    """
+    out_root = Path(out_root)
+    if not out_root.is_dir():
+        return 0
+    n = 0
+    for prev in out_root.glob(f"{PREV_PREFIX}*"):
+        if not prev.is_dir():
+            continue
+        final = prev.with_name(prev.name[len(PREV_PREFIX):])
+        if final.exists():
+            shutil.rmtree(prev, ignore_errors=True)      # publication completed; drop the old copy
+        else:
+            os.replace(prev, final)
+            log(f"[recover] restored {final.name} after an interrupted publication")
+            n += 1
+    return n
+
+
+def frame_state(frame_dir: Path, fingerprint: dict | None = None) -> str:
+    """'missing' | 'mismatch' | 'done'.
+
+    'mismatch' means the frame is complete but was built from a different recipe or manifest than
+    this run is asking for -- previously accepted silently, which let one clip contain mutually
+    incompatible frames.  Also rejects a marker whose payload has vanished or changed size.
+    """
+    frame_dir = Path(frame_dir)
+    m = frame_dir / DONE
+    if not m.is_file():
+        return "missing"
+    try:
+        marker = json.loads(m.read_text())
+    except Exception:
+        return "missing"
+    if marker.get("complete") is not True:
+        return "missing"
+    for name, info in (marker.get("files") or {}).items():
+        p = frame_dir / name
+        if not p.is_file():
+            return "missing"
+        if "bytes" in info and p.stat().st_size != info["bytes"]:
+            return "missing"
+    if fingerprint:
+        have = marker.get("fingerprint")
+        if have is None:
+            return "mismatch"          # written by an older tool; cannot prove compatibility
+        for k in ("recipe_hash", "manifest", "manifest_size", "manifest_mtime_ns"):
+            if k in fingerprint and have.get(k) != fingerprint[k]:
+                return "mismatch"
+    return "done"
 
 
 def is_done(frame_dir: Path) -> bool:
@@ -198,6 +284,7 @@ def verify_frame(frame_dir: Path, deep: bool = True) -> dict:
         except json.JSONDecodeError as e:
             bad(f"{DONE} is not valid JSON: {e}")
 
+    import numpy as np
     npz = frame_dir / "surface.npz"
     if not npz.is_file():
         bad("surface.npz missing")
@@ -227,6 +314,17 @@ def verify_frame(frame_dir: Path, deep: bool = True) -> dict:
                 rep["n_points"] = int(n or 0)
                 if n == 0:
                     bad("surface.npz has zero points")
+                # Cross-check against what the exporter committed, so a payload that is readable
+                # but truncated to a different length cannot pass.
+                se = frame_dir / "surface_export.json"
+                if se.is_file():
+                    try:
+                        want = json.loads(se.read_text()).get("n_points")
+                        if want is not None and n is not None and int(want) != int(n):
+                            bad(f"surface.npz holds {n:,} points, surface_export.json "
+                                f"recorded {int(want):,}")
+                    except json.JSONDecodeError:
+                        bad("surface_export.json is not valid JSON")
         except Exception as e:
             # This is the BadZipFile case.  It is the whole point of --deep.
             bad(f"surface.npz unreadable: {type(e).__name__}: {e}")
@@ -236,10 +334,41 @@ def verify_frame(frame_dir: Path, deep: bool = True) -> dict:
 
 
 def verify_tree(out_root: Path, deep: bool = True) -> dict:
-    frames = sorted(p for p in Path(out_root).iterdir() if p.is_dir() and p.name.isdigit())
-    reports = [verify_frame(f, deep=deep) for f in frames]
+    """Verify a clip. Uses the EXPECTED frame list written at run start when one is present.
+
+    Discovery alone is not verification: frames that never reached publication simply do not exist
+    on disk, so a scan of existing directories cannot see them, and an empty directory used to
+    report `0/0 ok` and exit 0 -- a clean bill of health for a clip that was never built.
+    """
+    out_root = Path(out_root)
+    if not out_root.is_dir():
+        return dict(root=str(out_root), n_frames=0, n_ok=0, n_bad=1, total_points=0,
+                    bad=[{"frame": "-", "problems": [f"{out_root} does not exist"]}], missing=[])
+
+    expected = None
+    exp_file = out_root / "_EXPECTED.json"
+    if exp_file.is_file():
+        try:
+            expected = json.loads(exp_file.read_text()).get("frames")
+        except Exception:
+            expected = None
+
+    present = sorted(p for p in out_root.iterdir() if p.is_dir() and p.name.isdigit())
+    missing = []
+    if expected is not None:
+        have = {int(p.name) for p in present}
+        missing = sorted(set(expected) - have)
+        reports = [verify_frame(out_root / f"{f:05d}", deep=deep) for f in sorted(expected)
+                   if f in have]
+    else:
+        reports = [verify_frame(f, deep=deep) for f in present]
+
     ok = [r for r in reports if r["ok"]]
-    return dict(root=str(out_root), n_frames=len(reports), n_ok=len(ok),
-                n_bad=len(reports) - len(ok),
-                total_points=sum(r.get("n_points", 0) for r in ok),
+    n_bad = len(reports) - len(ok) + len(missing)
+    if expected is None and not present:
+        n_bad += 1
+        missing = ["<no _EXPECTED.json and no frames on disk: nothing was verified>"]
+    return dict(root=str(out_root), n_frames=len(reports) + len(missing), n_ok=len(ok),
+                n_bad=n_bad, expected=len(expected) if expected is not None else None,
+                missing=missing, total_points=sum(r.get("n_points", 0) for r in ok),
                 bad=[r for r in reports if not r["ok"]])
