@@ -19,6 +19,32 @@ it, plus a sanity render of the first frame.
 
 ---
 
+## Validated end-to-end run
+
+This exact command was run on the development machine (2 frames, 2 GPUs) and produced filtered
+clouds:
+
+```bash
+orhsurf run \
+  --clip <path-to>/manifest_fg.json \
+  --frames 40-41 --gpus 2
+```
+
+| frame | points (filtered) | before dedup | dropped: support<2 | dropped: isolated | npz |
+|---|---|---|---|---|---|
+| 00040 | **25,493,841** | 34,647,991 | 4,111,957 | 1,542,567 | 618,408,097 B |
+| 00041 | **25,468,900** | 34,648,862 | 4,112,462 | 1,532,516 | 617,815,052 B |
+
+`orhsurf verify` → `2/2 frames ok, 50,962,741 points total`. Wall clock 19.5 min for both frames in
+parallel, on a heavily contended box (load average ~65–98 from unrelated jobs).
+
+Per-frame stage timings (frame 00040): prep 2 s, dataset_build 35 s, scene_build 16 s,
+**da3_1008 88 s**, rewarp 19 s, **train 706 s**, **export 296 s**.
+
+The DA3 stage reproduced the reference recipe exactly: torch peak **23,353 MiB** (reference:
+23,353 MiB), worst scene-frame coverage **1.00000**, 50,000-point initial cloud. The k-NN gate
+reported `k=5 median 2.419 mm`, and its drop counts land within 1% of the reference frame's.
+
 ## Quick start
 
 ```bash
