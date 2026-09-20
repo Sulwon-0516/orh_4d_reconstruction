@@ -1,0 +1,14 @@
+# local dev bindings - never ship (contains this machine's paths)
+env.local.sh
+env.sh
+# environments and caches created by install.sh
+env/
+env-da3/
+cache/
+# outputs
+out/
+*.npz
+*.ply
+*.mp4
+__pycache__/
+*.pyc
