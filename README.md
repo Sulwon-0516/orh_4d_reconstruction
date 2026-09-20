@@ -163,3 +163,41 @@ tests/
 AmbiSuR is vendored under `third_party/AmbiSuR` with its upstream `LICENSE.md`; check its terms
 before redistributing. Depth Anything 3 is fetched at install time, not vendored. The DA3
 checkpoint is downloaded from HuggingFace and is **not** committed here.
+
+---
+
+## Status / TODO
+
+This repo is deliberately pushed early: it runs end to end today, and the remaining items are
+refinements rather than blockers. What is and is not proven:
+
+**Proven on the development machine**
+- End-to-end single command, 2 frames across 2 GPUs (exact command and counts above).
+- DA3 stage reproduces the reference recipe's memory profile exactly (23,353 MiB peak, worst
+  frame coverage 1.00000, 50,000-point initial cloud).
+- Durability properties, against deliberate truncation and a simulated crashed re-run
+  (`tests/test_atomicio.py`).
+- PyTorch3D replacement equals upstream to 1.1e-15 (`tests/test_quat.py`).
+- Two-env necessity (`tools/da3_env_compare.py`).
+
+**Not yet proven — do not assume these work**
+- [ ] **Everything Slurm.** No Slurm exists on the development machine. `slurm/*.sbatch` and the
+      Slurm half of `docs/INSTALL_SLURM.md` are written from documented behaviour and are marked
+      UNTESTED in place. Run `orhsurf doctor` inside an interactive allocation first.
+- [ ] **`install.sh` on a clean machine.** It was written against the known-good dependency set but
+      has not been run from scratch on a fresh host; the existing environments were reused for
+      testing. The CUDA extension build in particular is untested here.
+- [ ] **`orhsurf fetch --clip`.** The published dataset layout does not match the pipeline's input
+      contract (see below), so the clip fetch path cannot be exercised yet.
+- [ ] Full 150-frame clip, and 8-GPU scaling (only 2 GPUs were exercised).
+- [ ] The debug video renders (`--render-orbit/--render-time/--render-both`). The always-on static
+      check render is exercised; the video paths are not.
+
+**Blocked on a decision**
+- [ ] **The published dataset ships no foreground masks**, which this pipeline requires in two
+      places (AmbiSuR's per-view alpha, and the visual hull that orders cameras for DA3). Either
+      masks get published alongside the clips, or a mask-generation stage has to be added. See
+      `docs/DATA_CONTRACT.md`.
+- [ ] Our own `manifest.json` carries `mask_path: None`; the masks live in a second file,
+      `manifest_fg.json`. A published manifest needs them in one place.
+- [ ] Manifests store absolute paths, which do not survive a move between machines.
