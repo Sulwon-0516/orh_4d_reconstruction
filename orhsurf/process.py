@@ -137,7 +137,7 @@ def run(a) -> int:
         # A smoke run exists to prove the install and the data, so it uses the FULL recipe even
         # when the batch default is economy -- otherwise "the smoke test passed" would say nothing
         # about a quality run. An explicit --preset/--iterations still wins.
-        if getattr(a, 'preset', None) in (None, 'economy') and getattr(a, 'iterations', None) is None:
+        if getattr(a, 'preset', None) in (None, 'economy', 'fast') and getattr(a, 'iterations', None) is None:
             a.preset = 'quality'
         r = cli.recipe_from_args(a)
         print(f'[process] smoke: frame 0 only, preset {getattr(a, "preset", "quality")} '

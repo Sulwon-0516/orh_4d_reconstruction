@@ -548,8 +548,8 @@ def build_parser() -> argparse.ArgumentParser:
     whole = sub.add_parser("process", help="download, prepare, reconstruct and verify clips sequentially (first 150 frames by default)")
     whole.add_argument("--clips", nargs="+", required=True, help="clip IDs in execution order, e.g. C001 C002")
     whole.add_argument("--gpus", type=int, default=1, help="GPUs on this node; parallel frames within each clip, sequential clips")
-    whole.add_argument("--preset", default="economy",
-                       help="speed/quality point (default: economy). quality 7000 it | balanced "
+    whole.add_argument("--preset", default="fast",
+                       help="speed/quality point (default: fast). quality 7000 it | balanced "
                             "3000 | economy 2000 + 500/80 densify | draft 1000 | fast (-r 4, "
                             "quarter the points, 10 mm isolation). See README.")
     whole.add_argument("--iterations", type=int, default=None, help="overrides --preset")
@@ -589,7 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "of the frame list. Defaults to SLURM_ARRAY_TASK_ID.")
     r.add_argument("--shards", type=int, default=None,
                    help="total number of array tasks. Defaults to SLURM_ARRAY_TASK_COUNT.")
-    r.add_argument("--preset", default=None,
+    r.add_argument("--preset", default="fast",
                    help="speed/quality point: quality (7000 it, support 10.21, 692 s/frame) | balanced "
                         "(3000, 9.38, 343 s) | economy (2000 + 500/80 densify, 9.07, 261 s) | "
                         "draft (1000, 7.90, 198 s) | fast (-r 4 + 2000 it + 10 mm isolation, 151 s, "

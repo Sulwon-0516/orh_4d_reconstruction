@@ -465,10 +465,9 @@ The one-second hold is for inspection, not playback at the capture's original 15
 `--preset` picks a point on the iteration curve. Measured on **frame 40 of one clip** (the
 development ORH clip, not C001), same scene and same export filter, so only training changed:
 
-`orhsurf process` (the multi-clip batch path, and therefore `slurm/process_clips.sbatch`)
-**defaults to `economy`**. `orhsurf run` on a single clip still defaults to `quality`, and
-`--smoke` always runs the full recipe — a smoke test that used a cheaper recipe would not tell you
-anything about a quality run.
+**`fast` is the default on both paths** — `orhsurf run` and `orhsurf process` (and so
+`slurm/process_clips.sbatch`). `--smoke` always runs `quality`: a smoke test on a cheaper recipe
+would not tell you anything about a quality run. Pass `--preset quality` for the full recipe.
 
 ```bash
 sbatch --array=0-3%2 slurm/process_clips.sbatch C001 C002 C003 C004              # economy
@@ -480,9 +479,9 @@ orhsurf process --clips C001 --preset balanced --gpus 8
 |---|---|---|---|---|---|
 | `quality` | 7000 | 500/100 | 645,249 | **10.21** | 692 s |
 | `balanced` | 3000 | 500/100 | 728,730 | 9.38 | 343 s |
-| **`economy`** (batch default) | 2000 | 500/**80** | 676,926 | 9.07 | **261 s** |
+| `economy` | 2000 | 500/**80** | 676,926 | 9.07 | **261 s** |
 | `draft` | 1000 | 500/100 | 148,377 | 7.90 | 198 s |
-| `fast` | 2000 @ **`-r 4`** | 500/80 | 615,437 | 7.50 | **151 s** |
+| **`fast`** (default) | 2000 @ **`-r 4`** | 500/80 | 615,437 | 7.50 | **151 s** |
 
 `fast` is the only preset that changes the **raster**, and it is the only one whose isolation
 threshold moves with it: it sets `--resolution 4` **and** `--nn-max-mm 10`. Do not set one without
@@ -494,6 +493,37 @@ before being written down. They have **not** been re-checked across frames or cl
 
 An explicit flag overrides the preset, so `--preset economy --iterations 2500` is legal;
 `--densify-from-iter` and `--densification-interval` are exposed for the same reason.
+
+### DA3 view grouping, and why the default is 17 rather than 18
+
+DA3 processes the 47 views in overlapping azimuth groups. The reference reconstruction used
+**18** views per group with overlap 6 — four groups — and on an 80 GB card that is fine. On a
+**24 GB card it is not**: DA3 at 1008 px peaks around **23.35 GB** against ~**23.70 GB** free on a
+*completely idle* card, and ~350 MB of headroom is thinner than allocator fragmentation.
+
+The failure does not announce itself as OOM. It arrives as
+
+```
+RuntimeError: cusolver error: CUSOLVER_STATUS_INTERNAL_ERROR, when calling `cusolverDnCreate(handle)`
+  at depth_anything_3/utils/ray_utils.py:229  torch.linalg.svd(A)
+```
+
+which sends you reading about linear-algebra backends instead of about memory. Five consecutive
+frames failed this way on an otherwise empty 24 GB card at group size 18.
+
+**17 is the right step down**, not 12 or 8: with overlap 6 it still cuts 47 views into **four**
+groups, so DA3 sees the same view neighbourhoods with one fewer view each. Measured on frame 45:
+
+| group size | groups | DA3 | points | support |
+|---|---|---|---|---|
+| **17** | **4** | 98.3 s | 6,553,117 | **7.55** |
+| 12 | 7 | 91.7 s | 6,535,663 | 7.52 |
+| 8 | 8 | **131.3 s** | 6,523,671 | 7.44 |
+
+The point-count spread is 0.45%, inside the 0.50% run-to-run noise floor — headroom bought without
+meaningfully changing the output. Going further is counterproductive: at 8 the per-group overhead
+makes DA3 *slower* than at 17. Pass `--group-size 18` to reproduce the reference exactly on a card
+with room for it.
 
 ### `fast`: a quarter of the points, and why the threshold has to move with the raster
 

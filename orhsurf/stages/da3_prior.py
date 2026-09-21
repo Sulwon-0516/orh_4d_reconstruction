@@ -44,7 +44,25 @@ DA3_MODEL = "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
 # pre-staged cache would fail, and an online node could silently load a different revision.
 DA3_REVISION = "b2359bdf726fb44ef62acca04d629dcf158053e7"
 PROCESS_RES = 1008
-GROUP_SIZE = 18
+#: Views per DA3 group. The reference reconstruction used 18, and on an 80 GB card 18 is fine.
+#: On a 24 GB card it is not: DA3 at 1008 peaks around 23.35 GB against ~23.70 GB free on a
+#: COMPLETELY IDLE card, and that ~350 MB of headroom is thinner than allocator fragmentation.
+#: The failure does not look like OOM -- it surfaces as
+#:   RuntimeError: cusolver error: CUSOLVER_STATUS_INTERNAL_ERROR ... cusolverDnCreate(handle)
+#: from torch.linalg.svd inside DA3's ray_utils, which sends you looking at linear algebra
+#: backends rather than at memory. Five consecutive frames failed that way on an otherwise empty
+#: 24 GB card at 18.
+#:
+#: 17 is the right step down rather than 12 or 8, because with overlap 6 it still cuts 47 views
+#: into FOUR groups -- the same grouping structure, one fewer view each -- so DA3 sees the same
+#: view neighbourhoods. Measured on frame 45 (fast preset):
+#:   group 17: 4 groups, da3 98.3 s, 6,553,117 pts, support 7.55
+#:   group 12: 7 groups, da3 91.7 s, 6,535,663 pts, support 7.52
+#:   group  8: 8 groups, da3 131.3 s, 6,523,671 pts, support 7.44   <- more groups, SLOWER
+#: The spread in point count is 0.45%, inside the 0.50% run-to-run noise floor, so this buys
+#: headroom without meaningfully changing the output. Pass --group-size 18 to reproduce the
+#: reference exactly on a card with room for it.
+GROUP_SIZE = 17
 GROUP_OVERLAP = 6
 CONF_PERCENT = 20        # percentile used to threshold the initial point cloud
 MAX_POINTS = 50_000      # == S0's --max-points-for-colmap
