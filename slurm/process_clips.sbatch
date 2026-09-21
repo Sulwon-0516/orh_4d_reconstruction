@@ -13,7 +13,8 @@ SMOKE=()
 GPUS=1
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --smoke) SMOKE=(--smoke); shift ;;
+        --smoke) SMOKE+=(--smoke); shift ;;
+        --all-frames) SMOKE+=(--all-frames); shift ;;
         --gpus) GPUS="${2:?--gpus needs a count}"; shift 2 ;;
         --) shift; break ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;

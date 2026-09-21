@@ -1,8 +1,8 @@
-"""Reconstruct complete clips with one command:
+"""Reconstruct clips with one command:
 
     orhsurf process --clips C001 C002 C003 --gpus 1
 
-Downloads/prepares one clip, reconstructs every frame, verifies outputs, then starts the next.
+Downloads/prepares one clip, reconstructs the first 150 frames by default, verifies outputs, then starts the next.
 Re-run the same command to resume completed matching frames. Requires installation and a
 compute allocation; it does not submit or renew Slurm jobs.
 
@@ -530,12 +530,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     from .process import run as process_clips
-    whole = sub.add_parser("process", help="download, prepare, reconstruct and verify whole clips sequentially")
+    whole = sub.add_parser("process", help="download, prepare, reconstruct and verify clips sequentially (first 150 frames by default)")
     whole.add_argument("--clips", nargs="+", required=True, help="clip IDs in execution order, e.g. C001 C002")
     whole.add_argument("--gpus", type=int, default=1, help="GPUs on this node; parallel frames within each clip, sequential clips")
     whole.add_argument("--out-root", default=None, help="results under <root>/<clip>/<frame>; default out/")
     whole.add_argument("--cpus-per-job", type=int, default=None, help="thread limit within the existing allocation")
     whole.add_argument("--smoke", action="store_true", help="frame 0 only at full quality; isolated inputs and out/_smoke/<clip>")
+    whole.add_argument("--all-frames", action="store_true", help="process every encoded frame instead of the default first 150; --smoke takes precedence")
     whole.set_defaults(fn=process_clips)
 
     r = sub.add_parser("run", help="reconstruct a clip end to end (prep -> DA3 -> train -> export)")

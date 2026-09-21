@@ -1,4 +1,4 @@
-"""Sequential whole-clip workflow: prepare, reconstruct, verify; stop on failure."""
+"""Sequential clip workflow: prepare, reconstruct, verify; stop on failure."""
 from __future__ import annotations
 import json
 import re
@@ -6,13 +6,13 @@ from pathlib import Path
 from . import alloc, cpubudget, fetch, paths
 
 
-def full_frames(manifest: Path, smoke: bool = False) -> str:
-    """Require the full declared encoded range, not the CLI run's historical 0-149 default."""
+def full_frames(manifest: Path, smoke: bool = False, all_frames: bool = False) -> str:
+    """Validate every requested frame, including short clips and explicit full clips."""
     man = paths.read_manifest(manifest)
     n = int(man['window']['n_timestamps'])
-    wanted = [0] if smoke else list(range(n))
+    wanted = [0] if smoke else list(range(n if all_frames else min(n, 150)))
     if n < 1 or man.get('decoded_frames') != wanted:
-        raise ValueError(f'{manifest} does not contain the requested {"smoke" if smoke else "whole clip"} range')
+        raise ValueError(f'{manifest} does not contain the requested {"smoke" if smoke else "selected clip"} range')
     if not man.get('valid_serials'):
         raise ValueError(f'{manifest} has no valid cameras')
     for serial in man['valid_serials']:
@@ -20,26 +20,36 @@ def full_frames(manifest: Path, smoke: bool = False) -> str:
         indices = {int(k) for k in entries} if isinstance(entries, dict) else {f['index'] for f in entries}
         if indices != set(wanted):
             raise ValueError(f'{serial} has an incomplete frame range in {manifest}')
-    return '0-0' if smoke else f'0-{n-1}'
+    return f'0-{wanted[-1]}'
 
 
-def prepare(clip: str, data_root: Path, smoke: bool = False) -> Path:
-    # Dedicated full-clip inputs leave existing *_prepared subsets and their fingerprints intact.
-    prepared = data_root / f'{clip}_{"smoke" if smoke else "full"}_prepared'
+def prepare(clip: str, data_root: Path, smoke: bool = False, all_frames: bool = False) -> Path:
+    # Isolate selections so existing manifests and resume fingerprints stay unchanged.
+    selection = 'smoke' if smoke else ('full' if all_frames else 'first150')
+    prepared = data_root / f'{clip}_{selection}_prepared'
     manifest = prepared / 'manifest.json'
     if manifest.exists():
-        full_frames(manifest, smoke)  # refuse stale/partial input; do not silently rewrite a used manifest
+        full_frames(manifest, smoke, all_frames)  # refuse stale/partial input; do not silently rewrite a used manifest
         print(f'[process] reuse {manifest}', flush=True)
         return manifest
     raw = data_root / '_hevc' / clip
-    if (raw / 'video_manifest.json').is_file():
-        rc = fetch.convert_clip(raw, prepared, frames='0' if smoke else None)
+    if not (raw / 'video_manifest.json').is_file():
+        rc = fetch.fetch_clip(clip, data_root, convert=True, download_only=True)
+        if rc:
+            raise RuntimeError(f'download failed for {clip} (exit {rc})')
+    if smoke:
+        frames = '0'
+    elif all_frames:
+        frames = None
     else:
-        rc = fetch.fetch_clip(clip, data_root, convert=True, prepared_dir=prepared,
-                              frames='0' if smoke else None)
+        n = int(json.loads((raw / 'video_manifest.json').read_text())['window']['n_timestamps'])
+        if n < 1:
+            raise ValueError(f'{raw} has no frames')
+        frames = f'0-{min(n, 150)-1}'
+    rc = fetch.convert_clip(raw, prepared, frames=frames)
     if rc:
         raise RuntimeError(f'preparation failed for {clip} (exit {rc})')
-    full_frames(manifest, smoke)
+    full_frames(manifest, smoke, all_frames)
     return manifest
 
 
@@ -75,14 +85,14 @@ def run(a) -> int:
         return rc
     root = Path(a.out_root).expanduser().resolve() if a.out_root else paths.out_root()
     smoke = getattr(a, 'smoke', False)
+    all_frames = getattr(a, 'all_frames', False)
     if smoke:
         root = root / '_smoke'
         print('[process] smoke: frame 0 only, original 7000-iteration recipe; separate outputs', flush=True)
     for i, clip in enumerate(a.clips, 1):
         print(f'[process] {i}/{len(a.clips)}: {clip}', flush=True)
-        manifest = (prepare(clip, paths.data_root(), smoke=True) if smoke
-                    else prepare(clip, paths.data_root()))
-        frames = full_frames(manifest, smoke)
+        manifest = prepare(clip, paths.data_root(), smoke=smoke, all_frames=all_frames)
+        frames = full_frames(manifest, smoke, all_frames)
         out = root/clip
         args = parser.parse_args(['run','--clip',str(manifest),'--frames',frames,
                                   '--gpus',str(len(gpus)),'--cpus-per-job',str(budget),'--out',str(out),

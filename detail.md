@@ -340,10 +340,12 @@ sbatch --array=0-99%10 --nodes=1 --gres=gpu:8 \
 
 This is a Bash brace-expansion example and was not submitted. Node packing, availability and
 account limits remain scheduler decisions. The inspected pinned archive inventory contains
-C001 through C100; the total-work estimate assumes all have the 225 frames measured for C001.
+C001 through C100; the historical full-clip estimate below assumes explicit `--all-frames` and 225 frames per clip.
+The current default is the first 150 frames (10 seconds at 15 fps), with separate
+`*_first150_prepared` manifests; neither frame rate nor reconstruction quality is reduced.
 At 14.3 minutes per frame, 100 x 225 frames = 5,362.5 GPU-worker hours. Eighty equally fast GPUs
 would take about 67 hours under ideal scaling; 12 hours would require about 447 such GPUs before
-extra overhead. A 3-hour debug limit cannot fit the estimated 6.7-hour eight-GPU whole-clip task.
+extra overhead. A 3-hour debug limit cannot fit the estimated 6.7-hour eight-GPU 225-frame task.
 Use a permitted production partition or separately designed frame-chunk tasks; do not bypass
 limits with resubmission loops. Chunked multi-clip scheduling is not implemented by this script.
 

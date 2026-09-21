@@ -18,7 +18,7 @@ class ProcessTests(unittest.TestCase):
     def test_full_range_not_150_and_partial_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)/'manifest.json'; manifest(p)
-            self.assertEqual(process.full_frames(p),'0-224')
+            self.assertEqual(process.full_frames(p, all_frames=True),'0-224')
             m=json.loads(p.read_text()); m['decoded_frames']=[0,1,2,3,4]; p.write_text(json.dumps(m))
             with self.assertRaises(ValueError): process.full_frames(p)
 
@@ -27,18 +27,52 @@ class ProcessTests(unittest.TestCase):
             root=Path(tmp); p=root/'C001_full_prepared/manifest.json'; manifest(p)
             before=p.stat().st_mtime_ns
             with patch('orhsurf.process.fetch.fetch_clip') as fetch, patch('orhsurf.process.fetch.convert_clip') as convert:
-                self.assertEqual(process.prepare('C001',root),p)
+                self.assertEqual(process.prepare('C001',root,all_frames=True),p)
                 fetch.assert_not_called(); convert.assert_not_called()
             self.assertEqual(p.stat().st_mtime_ns,before)
+
+    def test_default_prepares_first_150_and_preserves_full_inputs(self):
+        for n in (225, 80):
+            with tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp); raw=root/'_hevc/C001'; raw.mkdir(parents=True)
+                (raw/'video_manifest.json').write_text(json.dumps({'window':{'n_timestamps':n}}))
+                full=root/'C001_full_prepared/manifest.json'; manifest(full,n)
+                original=full.read_bytes()
+                def convert(src,dst,frames):
+                    self.assertEqual(frames,f'0-{min(n,150)-1}')
+                    m=dst/'manifest.json'; manifest(m,min(n,150))
+                    content=json.loads(m.read_text()); content['window']['n_timestamps']=n
+                    m.write_text(json.dumps(content)); return 0
+                with patch('orhsurf.process.fetch.convert_clip',side_effect=convert) as convert_mock:
+                    selected=process.prepare('C001',root)
+                    self.assertEqual(process.full_frames(selected),f'0-{min(n,150)-1}')
+                    process.prepare('C001',root)
+                    self.assertEqual(convert_mock.call_count,1)
+                self.assertEqual(full.read_bytes(),original)
+
+    def test_fresh_download_requests_hevc_before_selecting_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            def download(clip,data,**kwargs):
+                self.assertEqual(kwargs,dict(convert=True,download_only=True))
+                raw=data/'_hevc'/clip; raw.mkdir(parents=True)
+                (raw/'video_manifest.json').write_text(json.dumps({'window':{'n_timestamps':225}}))
+                return 0
+            def convert(raw,dst,frames):
+                self.assertEqual(raw,root/'_hevc/C001')
+                self.assertEqual(frames,'0-149')
+                manifest(dst/'manifest.json',150); return 0
+            with patch('orhsurf.process.fetch.fetch_clip',side_effect=download), patch('orhsurf.process.fetch.convert_clip',side_effect=convert):
+                self.assertEqual(process.prepare('C001',root),root/'C001_first150_prepared/manifest.json')
 
     def exercise(self, failure, gpus=1, cpus=1, total_cpus=20):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); events=[]
-            def prep(clip,data):
-                events.append(('prepare',clip)); p=root/clip/'manifest.json'; manifest(p); return p
+            def prep(clip,data,**kwargs):
+                events.append(('prepare',clip)); p=root/clip/'manifest.json'; manifest(p,150); return p
             def run(a):
                 events.append(('run',Path(a.clip).parent.name))
-                self.assertEqual(a.frames,'0-224'); self.assertEqual(a.gpus,gpus)
+                self.assertEqual(a.frames,'0-149'); self.assertEqual(a.gpus,gpus)
                 self.assertEqual(a.cpus_per_job, cpus if cpus is not None else total_cpus//gpus)
                 return 7 if failure=='run' else 0
             def verify(a):

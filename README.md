@@ -2,116 +2,122 @@
 
 One multi-view clip → one filtered surface point cloud per timestamp, in calibrated world coordinates.
 
-## TL;DR — process complete clips with one command
+## TL;DR — install once, submit all clips with one command
+
+Each clip defaults to **the first 150 frames (0–149)**: **10 seconds at 15 fps**, not
+150 fps. Every selected frame uses the unchanged reconstruction recipe. The workflow downloads
+inputs as needed, prepares them, reconstructs them, and verifies all expected outputs.
+
+### 1. Install once in a shared checkout
+
+Run on an **allocated compute node**, using an existing allocation if available. Prerequisites:
+conda/mamba, CUDA Toolkit and a supported compiler. All worker nodes must see the same checkout,
+environments, cache and data paths; CUDA extensions must support their GPU architectures.
 
 ```bash
-orhsurf process --clips C001 C002 C003 C004 --gpus 1
-```
-
-For **each clip in order**, this prepares the downloaded videos, reconstructs **every encoded
-frame**, verifies the outputs, then starts the next clip. Weights are fetched once and reused.
-C001 means all 225 frames, not a five-frame test. Results go to `out/C001/00000/`, etc.
-The command stops on a failed stage. Re-run it to resume completed matching frames.
-
-**First-time setup:** `orhsurf` is this repository's CLI. The installer creates `bin/orhsurf`;
-`source env.sh` makes it available in the current shell. Use a CUDA GPU (A100 80 GB tested; **24 GB compatibility is configuration-dependent**),
-conda/mamba, CUDA Toolkit and a supported compiler. Run setup on a compute node.
-
-```bash
-# Only if you do not already have a compute allocation; adapt to your site's actual settings:
-srun --partition=debug --gres=gpu:1 --time=03:00:00 --pty bash
-
 git clone https://github.com/Sulwon-0516/orh_4d_reconstruction.git
 cd orh_4d_reconstruction
 ./install.sh --no-weights
 source env.sh
-orhsurf process --clips C001 --gpus 1
+orhsurf fetch --weights
+orhsurf doctor
 ```
 
-In every new terminal or batch script, change into the checkout and `source env.sh` again.
-No separate `fetch`, `doctor`, `run` or `verify` commands are needed for this workflow.
-`orhsurf process --help` lists options, including `--out-root` and a CPU thread limit.
-Without PATH setup, `./bin/orhsurf process --clips C001 --gpus 1` also works after installation.
+`orhsurf` is this repository's command, created as `bin/orhsurf` by the installer.
+`source env.sh` sets its PATH and the environment/data/cache paths. Install and fetch shared
+weights once, **not inside every array task**. Existing installations can skip this step.
+A100 80 GB is tested; 24 GB compatibility depends on the configuration.
 
-The command uses your existing compute allocation; it does not acquire or extend one. A full
-C001 is estimated at **~54 hours on one GPU**: the tested debug partition's three-hour limit
-cannot finish it. Use a permitted longer allocation or resume manually later. Downloads require
-network unless inputs and weights are already present. Clip preparation happens one clip at a
-time, not by pre-downloading the entire list. No CPU/memory resource request is invented.
+### 2. Set your cluster options
 
-### Separate clips as separate Slurm jobs
-
-Submit from the installed checkout, adding your site's required account/project options:
+In Bash, from the installed checkout, replace the marked values with your **actual approved**
+settings. Use a partition and time limit suitable for a full task; the debug partition has a
+three-hour maximum on the tested cluster. No CPU or memory allocation is hard-coded.
 
 ```bash
-sbatch --array=0-3%2 slurm/process_clips.sbatch C001 C002 C003 C004
+export MODEL_OUTPUT_DIR="/REPLACE_WITH_APPROVED_SHARED_OUTPUT_ROOT"
+SBATCH_SITE=(--partition="REPLACE_WITH_PARTITION" --account="REPLACE_WITH_ACCOUNT"
+             --wckey="REPLACE_WITH_PROJECT_WCKEY" --time="REPLACE_WITH_TIME_LIMIT")
 ```
 
-Array tasks 0/1/2/3 handle C001/C002/C003/C004 respectively; `%2` allows at most two clips
-concurrently. Each task gets one GPU by default and performs preparation, full reconstruction
-and verification. Set an approved partition and wall time via sbatch options. Different tasks
-can run on different nodes. Unlike `process --clips ...` in one shell, these clips are independent.
-To use two GPUs **per clip**, specify both `sbatch --gres=gpu:2` and script argument `--gpus 2`.
+The tested cluster requires account, project WCKey and `MODEL_OUTPUT_DIR`; other sites may omit
+unused options. Keep these settings in your own shell configuration if desired. The output root
+must be writable and shared across nodes. Submit from this checkout in each new terminal.
 
-Optional first-frame smoke run (same quality, separate inputs and outputs):
+### 3. Submit C001–C100
+
+For **8 GPUs per clip**, with **at most 10 clips running concurrently**:
 
 ```bash
-sbatch --partition=debug --time=00:30:00 --array=0-1%1 \
-  slurm/process_clips.sbatch --smoke C001 C002
+sbatch "${SBATCH_SITE[@]}" --array=0-99%10 --gres=gpu:8 slurm/process_clips.sbatch --gpus 8 C{001..100}
 ```
 
-`--smoke` runs frame 0 at the unchanged 7,000-iteration/DA3-1008 recipe and verifies it; allow
-roughly 14 minutes plus input setup per clip based on the A100 measurement. Outputs go to
-`out/_smoke/<clip>/00000/`; full runs use `out/<clip>/`. When `MODEL_OUTPUT_DIR` is exported,
-the script uses that directory instead of `out/`. Logs are `slurm-process-<job>_<task>.out`.
-The array range must match the list; to retry selected indices, preserve the **original clip list**.
+This is one submission. Each array task selects a different clip, prepares its first 150 frames,
+processes those frames across its allocated GPUs, then verifies the result. The script sources
+`env.sh` automatically. There is no separate manual fetch/run/verify sequence per clip.
 
-On the tested cluster, sbatch additionally requires an approved `--account`,
-`--wckey=project-short-name:...` and `MODEL_OUTPUT_DIR`. Set your actual project values;
-the script does not invent them. Add `--test-only` before the script name to validate submission
-without creating jobs. Local array mapping/smoke isolation tests passed; the scheduler check
-currently awaits the project's approved `MODEL_OUTPUT_DIR`, so actual array execution is not
-claimed as validated. Existing `slurm/recon_array.sbatch` partitions frames of **one** clip;
-this new script partitions **different clips**.
+`%10` limits **tasks, not nodes**. Each task requests one node with eight GPUs; on eight-GPU nodes
+this can occupy up to ten nodes, subject to scheduler availability. Slurm places the tasks;
+the wrapper does not discover spare GPUs or spread one clip across nodes. Change **both**
+`--gres=gpu:8` and `--gpus 8` to the desired GPUs per task. With one GPU per task, several tasks
+may share a node. CPU thread counts stay within the actual allocation.
 
-### More GPUs on one node
-
-After obtaining an allocation with four GPUs visible to the same process:
-
-```bash
-orhsurf process --clips C001 C002 C003 C004 --gpus 4
-```
-
-Clips stay sequential; each clip's remaining frames are divided into contiguous ranges, with
-one worker per GPU. For C001 on two GPUs, an untouched clip divides into frames 0–112 and 113–224.
-This increases frame throughput; it does not split a single frame's model across GPUs.
-Completed matching frames can be resumed with a different GPU count.
-
-`--gpus` selects from GPUs already allocated on this node; it does not request more from Slurm
-or span multiple nodes. If fewer GPUs are visible, `process` stops before downloads. CPU threads
-default to allocated CPUs divided by the requested GPU count: 20 CPUs / 4 GPUs → 5 threads each.
-Explicit `--cpus-per-job` or `ORHSURF_CPUS_PER_JOB` overrides are **per worker**; their total must
-fit the allocation or the command stops. Each GPU needs its own VRAM; memory is not pooled across GPUs.
-Host RAM and concurrent scratch requirements grow with the number of workers; plan roughly
-6 GB scratch per worker based on historical measurements. Busy GPUs may be skipped by the
-runtime VRAM check. Speedup is not guaranteed to be linear because CPU and storage are shared.
-
-GPU mapping, frame partitioning, CPU budgets and allocation-error handling are covered by tests.
-Actual multi-GPU performance on this cluster has **not** been measured; the current live run
-continues on its existing single GPU.
+Results: `$MODEL_OUTPUT_DIR/C001/00000/surface.npz` through `00149/`, then the corresponding
+paths for each other clip. Clips shorter than 150 frames use all available frames.
+Logs: `slurm-process-<job>_<task>.out` in the submission directory.
+Downloaded videos remain complete archives; the 150-frame default reduces decoded inputs and
+reconstruction work, **not the archive download size**.
 
 <details>
-<summary>Resume, Slurm batch setup and development details</summary>
+<summary>Short validation, retries, full 15-second clips, and running inside an existing allocation</summary>
 
-`process` uses `data/C001_full_prepared/manifest.json`, keeping advanced `*_prepared` subsets
-separate. It reuses an existing complete manifest without rewriting it, preserving resume
-fingerprints. Existing subset outputs are not automatically migrated to the full-clip workflow.
-Do not run two processes on the same prepared/output directories concurrently.
+First validate one frame at unchanged quality (including preparation, reconstruction and verify):
 
-For batch use, put `source env.sh` and the single `process` command in a shell script; submit it
-from the checkout with your site's actual partition/account/time options. `slurm/*.sbatch` are
-multi-GPU/array templates with resource assumptions, not the one-GPU quick start.
-See [detail.md](detail.md) and [Slurm setup](docs/INSTALL_SLURM.md) for background and troubleshooting.
+```bash
+sbatch "${SBATCH_SITE[@]}" --gres=gpu:1 slurm/process_clips.sbatch --smoke C001
+```
+
+Smoke inputs and outputs are separate; results go to `$MODEL_OUTPUT_DIR/_smoke/C001/00000/`.
+Add `--test-only` before the script path to check scheduler submission without creating a job.
+Local orchestration tests passed; actual array execution has not been validated on this cluster:
+its submission check still needs the user's approved `MODEL_OUTPUT_DIR`.
+
+Retry only failed task indices, preserving the **original complete clip list** and output root:
+
+```bash
+sbatch "${SBATCH_SITE[@]}" --array=2,7%2 --gres=gpu:8 slurm/process_clips.sbatch --gpus 8 C{001..100}
+```
+
+This retries C003 and C008. Matching completed frames are reused; failed stages are not counted
+as successes. Reissuing the original submission resumes all clips. Never overlap jobs writing
+the same clip's prepared/output directories.
+
+To request every encoded frame (225 frames / 15 seconds for C001), explicitly add `--all-frames`.
+Use a distinct output root when switching from an existing 150-frame run:
+
+```bash
+MODEL_OUTPUT_DIR="$MODEL_OUTPUT_DIR/all_frames" sbatch "${SBATCH_SITE[@]}" --array=0-99%10 --gres=gpu:8 slurm/process_clips.sbatch --gpus 8 --all-frames C{001..100}
+```
+
+Default inputs are `data/C001_first150_prepared/manifest.json`; full inputs are
+`data/C001_full_prepared/manifest.json`. Existing manifests and subset outputs are preserved;
+they are not automatically migrated between selections. Reconstruction quality is unchanged.
+
+Inside an existing compute allocation, run clips sequentially without submitting new jobs:
+
+```bash
+source env.sh
+orhsurf process --clips C001 C002 C003 C004 --gpus 1
+```
+
+This uses `out/<clip>/` by default; pass `--out-root "$MODEL_OUTPUT_DIR"` for your chosen root.
+`--gpus` uses already allocated GPUs; it does not acquire or extend an allocation. With multiple
+GPUs, frames are partitioned within each clip; clips remain sequential in this shell command.
+The Slurm array is what makes different clips run independently.
+
+See [detail.md](detail.md) for timings, capacity estimates and implementation background, and
+[Slurm setup](docs/INSTALL_SLURM.md) for installation troubleshooting. The older
+`slurm/recon_array.sbatch` shards frames of one clip; use `process_clips.sbatch` for clip lists.
 
 </details>
 
@@ -175,7 +181,7 @@ PLY contains only positions/normals/RGB and loses support/confidence.
 ### Smaller point clouds — point count per frame, not fewer frames
 
 10M / 5M / 1M means the **number of 3D points inside each frame**. It does not mean fewer
-timestamps. The complete-clip reconstruction command above still processes every frame.
+timestamps. The default reconstruction processes all first 150 frames; simplification changes points per frame.
 
 Measured on C001 frame 0; all three derived files passed deep verification and an exact comparison
 of saved attributes against the selected source points:
@@ -270,7 +276,7 @@ against captured RGB, use the camera's calibrated pose and intrinsics, not a gue
 from pathlib import Path
 from orhsurf.paths import read_manifest
 
-m = read_manifest(Path("data/C001_full_prepared/manifest.json"))
+m = read_manifest(Path("data/C001_first150_prepared/manifest.json"))
 serial = m["valid_serials"][0]  # choose a valid camera with a clear view of your region
 camera = m["cameras"][serial]
 frame_index = 0                # encoded MP4 index, NOT source video_frame_index
@@ -281,7 +287,7 @@ distortion = camera["dist_params"]
 world_to_camera = camera["T_cam_from_world"]
 ```
 
-Converted full-clip inputs are `data/C001_full_prepared/rgb/<serial>/<index:05d>.png`, at 2048×1536 for C001.
+Converted default inputs are `data/C001_first150_prepared/rgb/<serial>/<index:05d>.png`, at 2048×1536 for C001.
 They retain lens distortion: pair them with `K_original` and distortion coefficients. DA3's
 undistorted images and the cropped/recentred training images use different intrinsics; see
 [the camera contract](docs/DATA_CONTRACT.md). C001 spans 15 seconds at 15 fps; `0-4` are its first
@@ -293,7 +299,7 @@ five encoded timestamps. Actual timing metadata is in the manifest.
 source env.sh
 "$ORHSURF_PYTHON" -m pip install viser  # optional, once, on a compute node
 orhsurf view --npz out/C001/00000/surface.npz \
-  --manifest data/C001_full_prepared/manifest.json --host 127.0.0.1 --port 8080 --budget '1.2 M'
+  --manifest data/C001_first150_prepared/manifest.json --host 127.0.0.1 --port 8080 --budget '1.2 M'
 ```
 
 From your own computer, using your SSH login alias and the actual allocated compute hostname:
