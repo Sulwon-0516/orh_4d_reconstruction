@@ -1,19 +1,12 @@
-"""orhsurf command line.
+"""Reconstruct complete clips with one command:
 
-The headline path is ONE command:
+    orhsurf process --clips C001 C002 C003 --gpus 1
 
-    orhsurf run --clip <clip-id> --gpus 8 --frames 0-149
+Downloads/prepares one clip, reconstructs every frame, verifies outputs, then starts the next.
+Re-run the same command to resume completed matching frames. Requires installation and a
+compute allocation; it does not submit or renew Slurm jobs.
 
-which does prep -> DA3 1008 -> rewarp -> train 7k -> export WITH the filter, per frame, across the
-GPUs, and leaves filtered surface.npz on disk.  The staged subcommands exist for debugging; they
-are not a workflow anyone has to remember.
-
-Scheduling: the frame list is partitioned into CONTIGUOUS in-order slices, one per GPU, and each
-slice is worked by its own worker PROCESS (not thread).  One job per GPU -- packing two AmbiSuR
-trainings onto one GPU was measured twice on the reference node and lost both times (451 s solo vs
-1705 s each packed at 7k), and the DA3 stage OOMs at two per GPU regardless of -r.  Separate
-processes rather than threads because each needs its own CUDA context pinned to one device, and
-because a segfault in one must not take the run down.
+Advanced commands: fetch (inputs), run (selected frames), verify (outputs), render and view.
 """
 from __future__ import annotations
 
@@ -529,6 +522,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser("orhsurf", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    from .process import run as process_clips
+    whole = sub.add_parser("process", help="download, prepare, reconstruct and verify whole clips sequentially")
+    whole.add_argument("--clips", nargs="+", required=True, help="clip IDs in execution order, e.g. C001 C002")
+    whole.add_argument("--gpus", type=int, choices=(1,), default=1, help="one GPU, sequential frames and clips")
+    whole.add_argument("--out-root", default=None, help="results under <root>/<clip>/<frame>; default out/")
+    whole.add_argument("--cpus-per-job", type=int, default=None, help="thread limit within the existing allocation")
+    whole.set_defaults(fn=process_clips)
 
     r = sub.add_parser("run", help="reconstruct a clip end to end (prep -> DA3 -> train -> export)")
     r.add_argument("--clip", required=True, help="clip id under the data root, or a manifest path")

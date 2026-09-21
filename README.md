@@ -2,69 +2,55 @@
 
 One multi-view clip → one filtered surface point cloud per timestamp, in calibrated world coordinates.
 
-## TL;DR — one GPU, first frame, then five
-
-**`orhsurf` is this repository's command-line interface.** Running `./install.sh` creates
-`bin/orhsurf` and the Python environments. Then `source env.sh` adds that executable to your
-current shell's PATH and selects the installed interpreters. You do not install a separate
-`orhsurf` package or need to activate conda manually after setup.
-
-Use a **40 GB+ GPU** for the default recipe (tested on A100 80 GB). Have conda/mamba,
-CUDA Toolkit and a supported compiler on PATH. Run installation and processing on a compute node.
+## TL;DR — process complete clips with one command
 
 ```bash
-# Only if you do not already have a compute allocation (site-specific partition/account):
-srun --partition=debug --gres=gpu:1 --time=03:00:00 --pty bash
-
-# Inside the allocated compute shell:
-git clone https://github.com/Sulwon-0516/orh_4d_reconstruction.git
-cd orh_4d_reconstruction
-./install.sh --no-weights       # creates env/, env-da3/, env.sh and bin/orhsurf
-source env.sh                   # makes the orhsurf command available in THIS shell
-command -v orhsurf              # should print <this-checkout>/bin/orhsurf
-orhsurf --help                  # lists the available commands
-orhsurf fetch --weights
-orhsurf fetch --clip C001 --convert --frames 0-4
-orhsurf doctor
-
-orhsurf run --clip data/C001_prepared/manifest.json --gpus 1 --frames 0-0 --out out/C001
-orhsurf verify --out out/C001
-# Inspect out/C001/_check/check_00000.png, then reuse completed frame 0:
-orhsurf run --clip data/C001_prepared/manifest.json --gpus 1 --frames 0-4 --out out/C001
-orhsurf verify --out out/C001                   # expect 5/5
+orhsurf process --clips C001 C002 C003 C004 --gpus 1
 ```
 
-Command guide: `fetch` downloads/prepares inputs, `doctor` checks the environment, `run`
-reconstructs the selected frames, and `verify` checks the generated files. For options, use
-`orhsurf run --help` (or the corresponding subcommand).
+For **each clip in order**, this prepares the downloaded videos, reconstructs **every encoded
+frame**, verifies the outputs, then starts the next clip. Weights are fetched once and reused.
+C001 means all 225 frames, not a five-frame test. Results go to `out/C001/00000/`, etc.
+The command stops on a failed stage. Re-run it to resume completed matching frames.
 
-**In every new terminal or batch script**, change into the checkout and run `source env.sh`
-again. If you see `orhsurf: command not found`, this shell setup is the first thing to check.
-After installation, `./bin/orhsurf --help` also works directly from the checkout; the launcher
-loads `env.sh` itself. It runs the installed Python's `-m orhsurf.cli` entry point.
+**First-time setup:** `orhsurf` is this repository's CLI. The installer creates `bin/orhsurf`;
+`source env.sh` makes it available in the current shell. Use a **40 GB+ GPU** (A100 80 GB tested),
+conda/mamba, CUDA Toolkit and a supported compiler. Run setup on a compute node.
 
-For an existing checkout/environment, start at `source env.sh`; reuse prepared data and weights.
-`debug` and its three-hour limit are from the tested cluster: use your site's actual partition
-and required account. No CPU/memory allocation is assumed in these commands; program threads
-are derived from the allocation. Downloads can happen inside that allocation.
-The install, weights and clip downloads need network access; reconstruction can run offline.
+```bash
+# Only if you do not already have a compute allocation; adapt to your site's actual settings:
+srun --partition=debug --gres=gpu:1 --time=03:00:00 --pty bash
+
+git clone https://github.com/Sulwon-0516/orh_4d_reconstruction.git
+cd orh_4d_reconstruction
+./install.sh --no-weights
+source env.sh
+orhsurf process --clips C001 --gpus 1
+```
+
+In every new terminal or batch script, change into the checkout and `source env.sh` again.
+No separate `fetch`, `doctor`, `run` or `verify` commands are needed for this workflow.
+`orhsurf process --help` lists options, including `--out-root` and a CPU thread limit.
+Without PATH setup, `./bin/orhsurf process --clips C001 --gpus 1` also works after installation.
+
+The command uses your existing compute allocation; it does not acquire or extend one. A full
+C001 is estimated at **~54 hours on one GPU**: the tested debug partition's three-hour limit
+cannot finish it. Use a permitted longer allocation or resume manually later. Downloads require
+network unless inputs and weights are already present. Clip preparation happens one clip at a
+time, not by pre-downloading the entire list. No CPU/memory resource request is invented.
 
 <details>
-<summary>Full clip, batch submission, installation and debugging details</summary>
+<summary>Resume, Slurm batch setup and development details</summary>
 
-Choose the full range **before conversion**: replace both conversion and run selections with
-`--frames 0-224`. C001 contains 225 frames. Five decoded frames cannot serve a full-clip run.
-Do not overwrite the input manifest of an active run. Full-clip processing on one GPU is estimated
-at about 54 hours, so a three-hour debug allocation cannot finish it.
-Re-run the same reconstruction command with the same manifest, recipe and output root to resume
-completed frames in a later allocation; interrupted frames may require reconstruction again.
-There is no automatic resubmission loop.
+`process` uses `data/C001_full_prepared/manifest.json`, keeping advanced `*_prepared` subsets
+separate. It reuses an existing complete manifest without rewriting it, preserving resume
+fingerprints. Existing subset outputs are not automatically migrated to the full-clip workflow.
+Do not run two processes on the same prepared/output directories concurrently.
 
-For batch use, put `source env.sh`, `run` and `verify` in a shell script and submit it from the
-checkout with your site's real partition/account/time options. Existing `slurm/*.sbatch` files
-are multi-GPU/array templates with resource assumptions; review them before use.
-See [detail.md](detail.md) for installation, conversion, resume semantics, experiments and
-[Slurm notes](docs/INSTALL_SLURM.md) for deployment setup.
+For batch use, put `source env.sh` and the single `process` command in a shell script; submit it
+from the checkout with your site's actual partition/account/time options. `slurm/*.sbatch` are
+multi-GPU/array templates with resource assumptions, not the one-GPU quick start.
+See [detail.md](detail.md) and [Slurm setup](docs/INSTALL_SLURM.md) for background and troubleshooting.
 
 </details>
 
@@ -125,6 +111,49 @@ all true). All six arrays total approximately **866 MB uncompressed** at 25.5 M 
 RAM for loading, masks and copies. Compressed NPZ arrays do not provide memory-mapped access.
 PLY contains only positions/normals/RGB and loses support/confidence.
 
+### Smaller point clouds — point count per frame, not fewer frames
+
+10M / 5M / 1M means the **number of 3D points inside each frame**. It does not mean fewer
+timestamps. The complete-clip reconstruction command above still processes every frame.
+
+Measured on C001 frame 0; all three derived files passed deep verification and an exact comparison
+of saved attributes against the selected source points:
+
+| Version | Points per frame | NPZ size | Saved vs original | CPU processing time* |
+|---|---:|---:|---:|---:|
+| Original | 25,475,015 | 617.8 MB | — | — |
+| 10M | 10,000,000 | 247.4 MB | 60.0% | 60 s |
+| 5M | 5,000,000 | 124.4 MB | 79.9% | 44 s |
+| 1M | 1,000,000 | 25.1 MB | 95.9% | 33 s |
+
+*CPU thread limit 2; includes clustering, writing and verification, excludes initial source load.
+These are one-frame measurements; full-clip quality and storage averages are not yet measured.
+On 50,000 sampled source points, the 95th-percentile distance to the nearest retained point was
+**2.96 mm / 5.43 mm / 17.20 mm** for 10M / 5M / 1M. These are sample statistics, not worst-case
+bounds. The shared-camera preview shows more normal variation at 1M; choose a point budget after
+checking the detail you need, rather than treating storage saving as proof of equivalent quality.
+
+The optional simplifier operates on a completed frame (it is not automatically enabled by `process`):
+
+```bash
+"$ORHSURF_PYTHON" -m orhsurf.simplify --source out/C001/00000 --out out/C001_simplified \
+  --targets 10000000,5000000,1000000 --cpus 2
+```
+
+Outputs: `out/C001_simplified/{10M,5M,1M}/00000/surface.npz`, with completion markers and
+provenance. The original is preserved. The same NPZ loader and viewer work on these files.
+Use a thread count within your allocation. Float attributes remain **float32**.
+
+The method groups by spatial voxel **and normal direction** (30° maximum within a normal bin),
+retains the highest-support original point per group, then trims surplus representatives with
+a fixed random seed to hit the exact budget. Each target is computed from the original; versions
+are not nested. Voxel size and trim counts are recorded. This is a practical approximation,
+not an optimal nearest-neighbour/mesh decimator or a guarantee against losing thin structures.
+No coordinates, colours or support values are averaged. Zero-length source normals use a separate
+unknown-direction bin. See [library alternatives](detail.md#point-cloud-simplification-alternatives).
+Keeping the original and all three versions adds storage; savings require choosing which derived
+version to retain later. Nothing deletes the original automatically.
+
 ## Cameras and matching RGB frames
 
 For reconstruction, keep **all 47 valid C001 cameras** and the default DA3 groups (18 views,
@@ -139,7 +168,7 @@ against captured RGB, use the camera's calibrated pose and intrinsics, not a gue
 from pathlib import Path
 from orhsurf.paths import read_manifest
 
-m = read_manifest(Path("data/C001_prepared/manifest.json"))
+m = read_manifest(Path("data/C001_full_prepared/manifest.json"))
 serial = m["valid_serials"][0]  # choose a valid camera with a clear view of your region
 camera = m["cameras"][serial]
 frame_index = 0                # encoded MP4 index, NOT source video_frame_index
@@ -150,7 +179,7 @@ distortion = camera["dist_params"]
 world_to_camera = camera["T_cam_from_world"]
 ```
 
-Converted inputs are `data/C001_prepared/rgb/<serial>/<index:05d>.png`, at 2048×1536 for C001.
+Converted full-clip inputs are `data/C001_full_prepared/rgb/<serial>/<index:05d>.png`, at 2048×1536 for C001.
 They retain lens distortion: pair them with `K_original` and distortion coefficients. DA3's
 undistorted images and the cropped/recentred training images use different intrinsics; see
 [the camera contract](docs/DATA_CONTRACT.md). C001 spans 15 seconds at 15 fps; `0-4` are its first
@@ -162,7 +191,7 @@ five encoded timestamps. Actual timing metadata is in the manifest.
 source env.sh
 "$ORHSURF_PYTHON" -m pip install viser  # optional, once, on a compute node
 orhsurf view --npz out/C001/00000/surface.npz \
-  --manifest data/C001_prepared/manifest.json --host 127.0.0.1 --port 8080 --budget '1.2 M'
+  --manifest data/C001_full_prepared/manifest.json --host 127.0.0.1 --port 8080 --budget '1.2 M'
 ```
 
 From your own computer, using your SSH login alias and the actual allocated compute hostname:

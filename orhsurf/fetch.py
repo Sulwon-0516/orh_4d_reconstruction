@@ -53,7 +53,8 @@ def fetch_weights(cache: Path) -> int:
 
 
 def fetch_clip(clip: str, data_root: Path, convert: bool = False,
-               masks: str | None = None, frames: str | None = None) -> int:
+               masks: str | None = None, frames: str | None = None,
+               prepared_dir: Path | None = None) -> int:
     """Download and extract one clip archive.
 
     Raw archives contain RGB data and calibration, but no foreground masks. With
@@ -89,7 +90,7 @@ def fetch_clip(clip: str, data_root: Path, convert: bool = False,
             tf.extractall(extraction_root, filter="data")
         print(f"[fetch] extracted to {dest}")
         if convert:
-            return convert_clip(dest, data_root / f"{clip}_prepared", masks=masks,
+            return convert_clip(dest, prepared_dir if prepared_dir is not None else data_root / f"{clip}_prepared", masks=masks,
                                 frames=frames)
         _report_missing(dest, clip)
         return 0

@@ -1,6 +1,6 @@
 # Compute-node installation and Slurm deployment
 
-Start with the [README TL;DR](../README.md#tldr--one-gpu-first-frame-then-five).
+Start with the [README TL;DR](../README.md#tldr--process-complete-clips-with-one-command).
 An existing one-GPU Slurm allocation has been exercised end to end on A100 80 GB PCIe.
 The array and multi-GPU `slurm/*.sbatch` templates remain **unvalidated on this cluster**.
 
@@ -29,10 +29,7 @@ Use your site's actual module names; no universal `module load cuda/...` command
 ```bash
 ./install.sh --no-weights
 source env.sh
-orhsurf doctor --phase noweights
-orhsurf fetch --weights
-orhsurf fetch --clip C001 --convert --frames 0-4
-orhsurf doctor
+orhsurf process --clips C001 --gpus 1  # weights, full clip, reconstruction and verification
 ```
 
 The installer creates `env/` (torch 2.7.1+cu128) and `env-da3/` (torch 2.6.0+cu124), builds the
@@ -60,9 +57,7 @@ the pipeline derives a per-worker budget from Slurm. Do not use node-wide `nproc
 
 ```bash
 source env.sh
-export HF_HUB_OFFLINE=1  # only after data and weights are present
-orhsurf run --clip data/C001_prepared/manifest.json --frames 0-4 --gpus 1 --out out/C001
-orhsurf verify --out out/C001
+orhsurf process --clips C001 C002 --gpus 1  # sequential whole clips; reuse completed results
 ```
 
 The same command reuses completed matching frames. Keep the same manifest, recipe and output

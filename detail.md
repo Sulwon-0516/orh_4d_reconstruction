@@ -237,3 +237,83 @@ difference between two runs as expected, and do not compare point counts to the 
 AmbiSuR is vendored with its upstream `third_party/AmbiSuR/LICENSE.md`.
 DA3 code and checkpoint retain their upstream terms; weights, data and generated environments
 are not committed. Review upstream terms before redistributing them.
+
+
+## Point-cloud simplification alternatives
+
+The exported product is an oriented point cloud, without triangle connectivity.
+
+| Library | Relevant operation | Fit for this output |
+|---|---|---|
+| [trimesh](https://trimesh.org/trimesh.html#trimesh.Trimesh.simplify_quadric_decimation) | Quadric mesh decimation | Requires a mesh; not a direct point-cloud simplifier |
+| [Blender](https://docs.blender.org/manual/en/latest/modeling/geometry_nodes/geometry/operations/merge_by_distance.html) | Merge by Distance for points | Distance-based; normal-aware separation requires additional logic |
+| [Open3D](https://www.open3d.org/docs/release/python_api/open3d.geometry.PointCloud.html) | `voxel_down_sample` | Averages normals/colours; averaging normals does not enforce a normal-angle merge gate |
+| [PyMeshLab](https://pymeshlab.readthedocs.io/en/latest/filter_list.html#generate-simplified-point-cloud) | `generate_simplified_point_cloud` | Direct Poisson-disk point sampling; target count with tolerance, no documented normal-angle gate |
+
+PyMeshLab is the closest ready-made baseline. `samplenum` sets the desired count;
+`exactnumflag=True` searches for a radius to meet a tolerance (default 0.5%), rather than
+promising an exact count. It has not been benchmarked on this 25.5M-point output. Meshing just
+for decimation would introduce another reconstruction step and change the product.
+
+Our dependency-free simplifier uses conservative bins of normal vector components and a spatial
+voxel grid. Same-bin normalized normals have a bounded angular difference; normals across bin
+boundaries may stay separate even when close. Voxel tuning is heuristic because moving the grid
+scale does not give strictly monotonic occupancy. Final seeded trimming enforces exact counts
+but removes some occupied groups, so the voxel diagonal is **not** a global coverage bound after
+trimming. All six NPZ attributes are copied from original representatives and checked after save.
+
+
+## Development-only frame subset checks
+
+The README's `process` command handles complete clips. These lower-level commands are only
+for debugging a first frame or five-frame subset; they are not the production entry point.
+
+```bash
+source env.sh
+orhsurf fetch --weights
+orhsurf fetch --clip C001 --convert --frames 0-4
+orhsurf doctor
+orhsurf run --clip data/C001_prepared/manifest.json --gpus 1 --frames 0-0 --out out/C001_test5
+orhsurf verify --out out/C001_test5
+# Inspect out/C001_test5/_check/check_00000.png, then reuse frame 0:
+orhsurf run --clip data/C001_prepared/manifest.json --gpus 1 --frames 0-4 --out out/C001_test5
+orhsurf verify --out out/C001_test5
+```
+
+### Measured simplification (C001 frame 0)
+
+Source: 25,475,015 points, 617,821,162 bytes; float32 positions/normals.
+All derived NPZ arrays were decompressed, schema-checked and compared against the selected
+original attributes. These results describe one frame, not a full-clip benchmark.
+
+| Target | NPZ size (decimal MB) | Reduction vs source | CPU wall time, including writes/checks |
+|---|---:|---:|---:|
+| 10 M | 247.4 | 60.0% | 60.3 s |
+| 5 M | 124.4 | 79.9% | 44.0 s |
+| 1 M | 25.1 | 95.9% | 32.7 s |
+
+165,236 source points (0.65%) have zero-length normals. They are kept in a separate
+unknown-direction bin and never merged with points having a valid normal. The 30° bound applies
+to valid normal bins; it is not a bound on reconstruction error. Exact-budget trimming removed
+roughly 1.5–2.7% of the voxel representatives in this experiment.
+
+
+Shared-camera comparison: two views, shaded/normal/RGB, with at most 1.5M displayed points per
+cloud. The PNG was visually inspected; 1M shows more normal variation than the larger versions.
+For 50,000 seeded original-to-simplified nearest-neighbour samples:
+
+| Budget | Distance median / p95 / p99 (mm) | Nearest-normal angle median / p95 (degrees) |
+|---|---|---|
+| 10M | 1.10 / 2.96 / 3.70 | 0.97 / 29.05 |
+| 5M | 2.17 / 5.43 / 7.11 | 4.98 / 75.13 |
+| 1M | 5.55 / 17.20 / 24.66 | 29.71 / 114.63 |
+
+Nearest spatial neighbours are not necessarily members of the same normal bin or the same
+oriented surface, so these angle statistics are not a violation of the within-bin 30° gate.
+They also do not demonstrate orientation fidelity of the simplified cloud. Zero-normal pairs
+are excluded from angle statistics. Full-resolution/thin-feature quality remains application-dependent.
+
+The new `process` wrapper's orchestration tests check full-range discovery, clip ordering,
+manifest-preserving resume and stopping on reconstruction/verification failure. Heavy stages
+are replaced with test doubles in those tests. Existing real single-frame pipeline execution
+has passed; the new multi-clip command has not yet completed a real multi-clip GPU run.
