@@ -460,6 +460,51 @@ This writes `contact_sheet.png`, `sequence.mp4` (one second per reconstruction f
 `time_00000.png` etc. and `cameras.json`. The tool also decodes the entire MP4 to check it.
 The one-second hold is for inspection, not playback at the capture's original 15 fps.
 
+## Speed / quality presets
+
+`--preset` picks a point on the iteration curve. Measured on **frame 40 of one clip** (the
+development ORH clip, not C001), same scene and same export filter, so only training changed:
+
+| preset | iterations | densify | gaussians | support | wall/frame |
+|---|---|---|---|---|---|
+| `quality` (default) | 7000 | 500/100 | 645,249 | **10.21** | 692 s |
+| `balanced` | 3000 | 500/100 | 728,730 | 9.38 | 343 s |
+| `economy` | 2000 | 500/**80** | 676,926 | 9.07 | **261 s** |
+| `draft` | 1000 | 500/100 | 148,377 | 7.90 | 198 s |
+
+`support` is the mean number of cameras whose rendered depth agrees within `--consistency-mm`. It
+is the pipeline's own quality signal and it is a **proxy**, so these were also compared in 3D
+before being written down. They have **not** been re-checked across frames or clips.
+
+An explicit flag overrides the preset, so `--preset economy --iterations 2500` is legal;
+`--densify-from-iter` and `--densification-interval` are exposed for the same reason.
+
+### Two things the sweep settled, against expectation
+
+**Densifying harder is not better.** Starting earlier and running more often (`300/50`) multiplies
+the Gaussian count and makes the result *worse*:
+
+| iterations | densify | gaussians | support |
+|---|---|---|---|
+| 3000 | 500/100 (25x) | 728,730 | **9.38** |
+| 3000 | 300/50 (54x) | 1,684,432 | 8.64 |
+| 2000 | 500/100 (15x) | 504,506 | 9.02 |
+| 2000 | 300/50 (34x) | 1,414,340 | 8.76 |
+
+Over-split Gaussians stay small and unconverged, so the cameras agree with each other less. Note
+too that `quality` reaches the best support with **fewer** Gaussians than `balanced` does — a good
+reconstruction is well-placed Gaussians, not many of them. Only a mild increase (`500/80`, 18
+passes at 2000) came out marginally ahead, which is what `economy` uses.
+
+**Lower resolution buys speed without costing support, but costs points.** `-r 4` at 3000
+iterations: support 9.39 (vs 9.38 at `-r 2`), 223 s, but **4.34 M points instead of 24.75 M** — a
+point is one pixel of one camera's rendered depth, so the cloud shrinks with the raster, not with
+the Gaussians. Export falls 107 s → 36 s; training only 236 s → 187 s, because roughly half of a
+training step scales with Gaussian count rather than with pixels.
+
+> `-r 3` **crashes** AmbiSuR around 40% of training (`utils/loss_utils.py:102`,
+> `get_img_grad_weight` on an empty tensor). Use even divisors.
+
 ## Time and storage budget
 
 Current measurement: C001 frame 0, A100 80 GB PCIe, one GPU, eight CPU threads, default 7,000

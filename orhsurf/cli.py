@@ -77,10 +77,19 @@ def resolve_clip(clip: str) -> Path:
 
 
 def recipe_from_args(a) -> "object":
-    from .pipeline import Recipe
+    from .pipeline import Recipe, PRESETS
     r = Recipe()
+    # A preset sets a speed/quality point; an explicit flag then overrides any field of it, so
+    # `--preset economy --iterations 2500` is a legal and obvious thing to write.
+    name = getattr(a, "preset", None)
+    if name:
+        if name not in PRESETS:
+            raise SystemExit(f"unknown --preset {name!r}; choose from {', '.join(PRESETS)}")
+        for k, v in PRESETS[name].items():
+            setattr(r, k, v)
     for k in ("resolution", "iterations", "min_views", "nn_k", "nn_max_mm",
-              "consistency_mm", "group_size", "write_ply"):
+              "consistency_mm", "group_size", "write_ply",
+              "densify_from_iter", "densification_interval"):
         v = getattr(a, k, None)
         if v is not None:
             setattr(r, k, v)
@@ -571,7 +580,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "of the frame list. Defaults to SLURM_ARRAY_TASK_ID.")
     r.add_argument("--shards", type=int, default=None,
                    help="total number of array tasks. Defaults to SLURM_ARRAY_TASK_COUNT.")
-    r.add_argument("--iterations", type=int, default=None, help="default 7000 (settled)")
+    r.add_argument("--preset", default=None,
+                   help="speed/quality point: quality (7000 it, best support 10.21, 692 s/frame) | "
+                        "balanced (3000, 9.38, 343 s) | economy (2000 + denser schedule, 9.07, "
+                        "261 s) | draft (1000, 7.90, 198 s). Measured on one frame; explicit "
+                        "--iterations / --densify-* override it.")
+    r.add_argument("--iterations", type=int, default=None, help="overrides --preset")
+    r.add_argument("--densify-from-iter", type=int, default=None, dest="densify_from_iter")
+    r.add_argument("--densification-interval", type=int, default=None,
+                   dest="densification_interval")
     r.add_argument("--resolution", type=int, default=None, help="AmbiSuR -r, default 2")
     r.add_argument("--min-views", type=int, default=None, dest="min_views")
     r.add_argument("--nn-k", type=int, default=None, dest="nn_k")

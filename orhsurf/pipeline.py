@@ -21,11 +21,45 @@ from . import atomicio, cpubudget, paths
 from .stages import da3_prior, prep as prep_stage
 
 
+#: Named speed/quality points, measured on frame 40 of one clip. `support` is the mean number of
+#: cameras whose rendered depth agrees within --consistency-mm; it is a PROXY, so these presets
+#: were also compared in 3D before being written down. They have NOT been re-checked across
+#: frames or clips -- treat them as starting points, not as settled recipe.
+PRESETS = {
+    # name        iterations  densify_from  interval   measured support / wall on frame 40
+    "quality":   dict(iterations=7000, densify_from_iter=500, densification_interval=100),
+    "balanced":  dict(iterations=3000, densify_from_iter=500, densification_interval=100),
+    "economy":   dict(iterations=2000, densify_from_iter=500, densification_interval=80),
+    "draft":     dict(iterations=1000, densify_from_iter=500, densification_interval=100),
+}
+
+
 @dataclass
 class Recipe:
     """The settled ORH recipe. Changing any of these changes the output; none is cosmetic."""
     resolution: int = 2                 # AmbiSuR -r
-    iterations: int = 7000              # settled by the user; NOT a knob to sweep here
+    iterations: int = 7000              # see PRESETS; this is the "quality" value
+    # --- densification schedule ---------------------------------------------------------
+    # Measured on frame 40 (one clip, one frame -- see PRESETS for the caveat). Gaussian count
+    # follows this schedule, but SUPPORT (how many cameras' rendered depth agree within
+    # --consistency-mm, the pipeline's own quality signal) follows ITERATIONS, not Gaussian count:
+    #
+    #   iters  densify           gaussians   support   wall
+    #    1000  500/100 (5x)        148,377      7.90    198 s
+    #    1000  300/50  (14x)       711,726      8.04    194 s
+    #    2000  500/100 (15x)       504,506      9.02    269 s
+    #    2000  500/80  (18x)       676,926      9.07    261 s
+    #    2000  300/50  (34x)     1,414,340      8.76    324 s
+    #    3000  500/100 (25x)       728,730      9.38    343 s
+    #    3000  300/50  (54x)     1,684,432      8.64    409 s
+    #    7000  500/100 (65x)       645,249     10.21    692 s
+    #
+    # Two things that table says: densifying HARDER is not better -- 3000/300x50 has 2.3x the
+    # Gaussians of 3000/500x100 and a WORSE support (8.64 vs 9.38), because over-split Gaussians
+    # stay small and unconverged. And 7000 reaches the best support with FEWER Gaussians than
+    # 3000 does, so a good reconstruction is well-placed Gaussians, not many of them.
+    densify_from_iter: int = 500
+    densification_interval: int = 100
     # --- export filter (the 2026-09-20 default) ---
     consistency_mm: float = 5.0
     min_views: int = 2
@@ -187,6 +221,8 @@ def run_frame(manifest_path: Path, frame_index: int, out_dir: Path, work_dir: Pa
          "-r", recipe.resolution, "--ncc_scale", recipe.ncc_scale,
          "--depth_weight", recipe.depth_weight, "--sh_unc_lower_max", recipe.sh_unc_lower_max,
          "--iterations", recipe.iterations,
+         "--densify_from_iter", recipe.densify_from_iter,
+         "--densification_interval", recipe.densification_interval,
          "--single_view_weight_from_iter", w, "--multi_view_weight_from_iter", w,
          "--unc_from_iter", w,
          "--multi_view_num", recipe.multi_view_num,
