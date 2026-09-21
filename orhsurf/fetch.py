@@ -52,7 +52,8 @@ def fetch_weights(cache: Path) -> int:
     return 0
 
 
-def fetch_clip(clip: str, data_root: Path) -> int:
+def fetch_clip(clip: str, data_root: Path, convert: bool = False,
+               masks: str | None = None, frames: str | None = None) -> int:
     """Download and extract one clip archive.
 
     WHAT THIS DOES NOT DO, stated up front because the docs used to imply otherwise: the published
@@ -84,6 +85,9 @@ def fetch_clip(clip: str, data_root: Path) -> int:
         with tarfile.open(tar_path) as tf:
             tf.extractall(data_root)
         print(f"[fetch] extracted to {dest}")
+        if convert:
+            return convert_clip(dest, data_root / f"{clip}_prepared", masks=masks,
+                                frames=frames)
         _report_missing(dest, clip)
         return 0
 
@@ -111,3 +115,50 @@ def _report_missing(dest: Path, clip: str) -> None:
             print(f"  - {p}")
         print("  This is a known gap between the published dataset and the input contract.\n"
               "  See docs/DATA_CONTRACT.md. A converter is not part of this package yet.")
+
+
+def convert_clip(clip_dir: Path, out_dir: Path, masks: str | None = None,
+                 frames: str | None = None) -> int:
+    """Decode the archive's videos and emit a manifest this pipeline can load.
+
+    Separated from fetch_clip so an already-extracted archive can be converted without
+    re-downloading 1.5 GB.  Masks are NOT invented here: --masks points at a directory laid out as
+    <masks>/<serial>/<encoded_frame_index:05d>.png (RGBA, foreground in ALPHA).  Without it the
+    manifest is written with mask_path=None and this function says exactly which step is still
+    missing, because prep.py asserts a mask per view and >= 8 non-empty ones.
+    """
+    import json
+    from . import convert as C
+
+    clip_dir, out_dir = Path(clip_dir), Path(out_dir)
+    vmj = clip_dir / "video_manifest.json"
+    if not vmj.exists():
+        print(f"[convert] ERROR: {vmj} not found -- is {clip_dir} an extracted clip archive?")
+        return 2
+    vm = json.load(open(vmj))
+    n = int(vm["window"]["n_timestamps"])
+    serials = list(vm["valid_serials"])
+    fps = n / max(float(vm["window"].get("duration_s") or 1), 1e-9)
+    want = C.parse_frames(frames, n)
+    print(f"[convert] {clip_dir.name}: {len(serials)} valid views, clip has {n} frames "
+          f"({vm['window'].get('duration_s')} s at {fps:.0f} fps)")
+    if len(want) != n:
+        print(f"[convert] decoding {len(want)} of them "
+              f"({want[0]}..{want[-1]}, {len(want) / fps:.1f} s) -- --frames {frames}")
+
+    rgb_root = C.decode_views(clip_dir, out_dir, serials, n, frames=want)
+    man_path = out_dir / "manifest.json"
+    _man, missing = C.build_manifest(clip_dir, rgb_root, masks, man_path, frames=want)
+
+    if missing:
+        views = len({s for s, _ in missing})
+        print(f"[convert] NO MASKS for {views} view(s) ({len(missing)} view-frames).")
+        print(f"[convert] The manifest is written and the frames are decoded, but `orhsurf run`")
+        print(f"[convert] will stop in prep: it asserts a foreground mask per view and needs >= 8")
+        print(f"[convert] non-empty ones. Supply them with --masks <dir>, laid out as")
+        print(f"[convert]   <dir>/<serial>/<frame:05d>.png   RGBA, foreground in the ALPHA channel")
+        print(f"[convert] The published archives do not carry masks; generating them is not part")
+        print(f"[convert] of this package. See docs/DATA_CONTRACT.md.")
+        return 3
+    print(f"[convert] ready: orhsurf run --clip {man_path}")
+    return 0

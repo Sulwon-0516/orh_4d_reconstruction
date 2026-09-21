@@ -1,0 +1,168 @@
+"""Turn a published HuggingFace clip archive into a manifest this pipeline can run.
+
+The published archives are HEVC video plus calibration; this pipeline wants per-frame image files
+and a manifest in its own schema (orhsurf/_vendor/colmap_dataset.py::frame_image_path).  Without
+this step `fetch --clip` produces a directory nothing can read, which is where the package stood.
+
+THE ONE THING THAT SILENTLY CORRUPTS A RUN
+------------------------------------------
+The dataset README is explicit: decoded MP4 frames are indexed by `encoded_frame_index` (0..224).
+`video_frame_index` refers to the ORIGINAL recording and must not be used as the MP4 index.  Confuse
+them and every camera is offset by an arbitrary amount -- the reconstruction still completes, it
+just fuses different time instants.  So this module NEVER derives an MP4 index from anything but
+`encoded_frame_index`, and asserts the decoded frame count rather than trusting it.
+
+MASKS
+-----
+The archives ship no foreground masks, and three places want them:
+  prep.py:72          asserts a mask_path per view, and >= 8 non-empty ones
+  build_scene         writes the mask into each image's alpha channel
+  visual_hull_box     derives the per-frame scene centre that orders views into DA3 groups
+Nothing in TRAINING uses them (train.py never calls get_gtImage; the loss uses unmasked RGB), so
+they do not make the output foreground-only.  This converter therefore does NOT invent masks.  It
+writes the frames and the manifest, and reports exactly what is still missing, so the gap is one
+named step rather than an opaque failure.
+"""
+from __future__ import annotations
+import json, shutil, subprocess
+from pathlib import Path
+
+EXPECT_W, EXPECT_H = 2048, 1536
+
+
+def _ffprobe_frames(mp4: Path) -> int:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+         "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(mp4)],
+        capture_output=True, text=True, check=True).stdout.strip()
+    return int(out)
+
+
+def parse_frames(spec: str | None, n_total: int) -> list[int]:
+    """'0-149' / '0,5,9' / None -> a sorted list of encoded_frame_index values.
+
+    A published clip is 225 frames (15 s at 15 fps); the window this project measured on is the
+    first 150 (10 s).  Decoding only what will be reconstructed saves 47 x 75 PNGs per clip, so the
+    choice belongs at convert time as well as at run time.
+    """
+    if not spec:
+        return list(range(n_total))
+    out = set()
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    bad = [i for i in out if not 0 <= i < n_total]
+    assert not bad, (f"frames {sorted(bad)[:5]} are outside this clip's 0..{n_total - 1} "
+                     f"(encoded_frame_index). The clip has {n_total} frames.")
+    return sorted(out)
+
+
+def decode_views(clip_dir: Path, out_dir: Path, serials, n_expect: int, frames=None, log=print):
+    """videos/<serial>.mp4 -> out_dir/rgb/<serial>/<encoded_frame_index:05d>.png
+
+    ffmpeg emits frames in decode order starting at 1, so image N is encoded_frame_index N-1.
+    That is the ONLY mapping used anywhere in this file.
+    Resumable: a serial whose directory already holds n_expect files is skipped.
+    """
+    out_dir = Path(out_dir)
+    want = list(range(n_expect)) if frames is None else list(frames)
+    contiguous_from_zero = want == list(range(len(want)))
+    done, todo = [], []
+    for s in serials:
+        d = out_dir / "rgb" / s
+        if d.is_dir() and all((d / f"{i:05d}.png").exists() for i in want):
+            done.append(s)
+        else:
+            todo.append(s)
+    if done:
+        log(f"[convert] {len(done)} view(s) already decoded, skipping")
+    for i, s in enumerate(todo, 1):
+        mp4 = clip_dir / "videos" / f"{s}.mp4"
+        assert mp4.exists(), f"missing video for {s}: {mp4}"
+        got = _ffprobe_frames(mp4)
+        assert got == n_expect, (
+            f"{s}: video holds {got} frames, manifest says {n_expect}. Refusing to decode -- a "
+            f"frame-count mismatch means the index mapping is not what this code assumes.")
+        d = out_dir / "rgb" / s
+        tmp = d.with_name(d.name + ".part")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp4)]
+        if contiguous_from_zero and len(want) < n_expect:
+            # decode-order prefix: stop early rather than writing 225 frames to keep 150
+            cmd += ["-frames:v", str(len(want))]
+        cmd += ["-start_number", "0", str(tmp / "%05d.png")]
+        subprocess.run(cmd, check=True)
+        if not contiguous_from_zero:
+            for f in sorted(tmp.glob("*.png")):
+                if int(f.stem) not in set(want):
+                    f.unlink()
+        n = len(list(tmp.glob("*.png")))
+        assert n == len(want), f"{s}: ffmpeg left {n} frames, expected {len(want)}"
+        shutil.rmtree(d, ignore_errors=True)
+        tmp.rename(d)                                  # atomic: a half-decoded view is never visible
+        log(f"[convert] decoded {s}  ({i}/{len(todo)})")
+    return out_dir / "rgb"
+
+
+def build_manifest(clip_dir: Path, rgb_root: Path, mask_root: Path | None, out_json: Path,
+                   frames=None, log=print):
+    """video_manifest.json -> this pipeline's manifest schema, with resolved local paths."""
+    vm = json.load(open(clip_dir / "video_manifest.json"))
+    n = int(vm["window"]["n_timestamps"])
+    valid = list(vm["valid_serials"])
+    cams = {}
+    missing_masks = []
+    for s, c in vm["cameras"].items():
+        c = dict(c)
+        assert int(c["width"]) == EXPECT_W and int(c["height"]) == EXPECT_H, (
+            f"{s}: {c['width']}x{c['height']}, expected {EXPECT_W}x{EXPECT_H}")
+        if c.get("valid", True) and s in valid:
+            want = list(range(n)) if frames is None else list(frames)
+            frames_out = []
+            for i in want:
+                mp = None
+                if mask_root is not None:
+                    cand = Path(mask_root) / s / f"{i:05d}.png"
+                    if cand.exists():
+                        mp = str(cand)
+                if mp is None:
+                    missing_masks.append((s, i))
+                # `index` is the encoded_frame_index -- the MP4 index, never video_frame_index
+                frames_out.append(dict(index=i,
+                                        frame_path=str(Path(rgb_root) / s / f"{i:05d}.png"),
+                                        mask_path=mp))
+            # frames is a DICT keyed by encoded_frame_index, not a list, so a converted subset
+            # keeps its true indices -- `run --frames 40-41` means frames 40 and 41 of the CLIP,
+            # never "the 40th thing that happened to be decoded".
+            c["frames"] = {str(f["index"]): f for f in frames_out}
+            c["n_frames_in_window"] = len(frames_out)
+        c.pop("video_path", None)
+        c.pop("timestamps_path", None)
+        cams[s] = c
+    man = dict(sequence_id=vm.get("clip_id", clip_dir.name),
+               source_dir=str(clip_dir), read_only=True,
+               generator="orhsurf.convert (HuggingFace HEVC archive)",
+               conventions=vm.get("conventions"), window=vm["window"],
+               timestamps=vm.get("timestamps"),
+               n_cameras_total=vm.get("n_cameras_total"),
+               n_cameras_valid=vm.get("n_cameras_valid"),
+               calibrated_serials=vm.get("calibrated_serials"),
+               valid_serials=valid, excluded_serials=vm.get("excluded_serials"),
+               extrinsics_direction=vm.get("extrinsics_direction"),
+               world_frame=vm.get("world_frame"),
+               frame_index_basis="encoded_frame_index (0-based MP4 decode order)",
+               decoded_frames=(list(range(n)) if frames is None else list(frames)),
+               cameras=cams)
+    Path(out_json).parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(out_json) + ".tmp")
+    json.dump(man, open(tmp, "w"), indent=1)
+    tmp.rename(out_json)
+    log(f"[convert] wrote {out_json}  ({len(valid)} valid views x {n} frames)")
+    return man, missing_masks

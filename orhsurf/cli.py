@@ -462,7 +462,9 @@ def cmd_fetch(a) -> int:
     if a.weights or not a.clip:
         rc |= fetch_weights(paths.cache_dir())
     if a.clip:
-        rc |= fetch_clip(a.clip, paths.data_root())
+        rc |= fetch_clip(a.clip, paths.data_root(),
+                         convert=getattr(a, "convert", False), masks=getattr(a, "masks", None),
+                         frames=getattr(a, "frames", None))
     return rc
 
 
@@ -572,6 +574,13 @@ def build_parser() -> argparse.ArgumentParser:
     f = sub.add_parser("fetch", help="download model weights and/or a clip")
     f.add_argument("--clip", default=None)
     f.add_argument("--weights", action="store_true")
+    f.add_argument("--convert", action="store_true",
+                   help="after extracting, decode the videos and write a loadable manifest")
+    f.add_argument("--masks", default=None,
+                   help="<dir>/<serial>/<frame:05d>.png RGBA masks to reference from the manifest")
+    f.add_argument("--frames", default=None,
+                   help="which frames to decode, e.g. 0-149 for the first 10 s of a 15 s clip. "
+                        "Default: all of them. Indices are encoded_frame_index.")
     f.set_defaults(fn=cmd_fetch)
 
     rr = sub.add_parser("render", help="debug renders from finished frames")

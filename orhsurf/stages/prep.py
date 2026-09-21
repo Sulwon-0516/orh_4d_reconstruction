@@ -57,18 +57,31 @@ def prep_views(manifest: dict, serials: list[str], frame_index: int, out_dir: Pa
     ud.mkdir(parents=True, exist_ok=True)
     md.mkdir(parents=True, exist_ok=True)
 
+    def _readable(p: Path) -> bool:
+        """A file EXISTING does not mean it is usable.
+
+        The reuse guard below used to test `exists()` only, so a zero-byte or truncated PNG left by
+        an interrupted run (or by a full filesystem) was silently trusted, and the failure surfaced
+        later as `TypeError: '>=' not supported between NoneType and int` -- which names neither
+        the file nor the cause. Same class of bug as trusting surface.npz's existence for resume.
+        """
+        try:
+            return p.is_file() and p.stat().st_size > 0 and \
+                cv2.imread(str(p), cv2.IMREAD_UNCHANGED) is not None
+        except Exception:
+            return False
+
     def one(s: str):
         cam = manifest["cameras"][s]
         K0, d, Ku, _ = cam_arrays(cam)
         f = frame_of(cam, frame_index)
         oi, om = ud / f"{s}.png", md / f"{s}.png"
-        if not (oi.exists() and om.exists()):
+        if not (_readable(oi) and _readable(om)):
             img = cv2.imread(f["frame_path"], cv2.IMREAD_COLOR)
             assert img is not None, f"cannot read frame {f['frame_path']}"
             assert img.shape[:2] == (cam["height"], cam["width"]), (
                 f"{s}: frame is {img.shape[1]}x{img.shape[0]}, manifest says "
                 f"{cam['width']}x{cam['height']}")
-            cv2.imwrite(str(oi), cv2.undistort(img, K0, d, None, Ku))
             assert f.get("mask_path"), (
                 f"{s} frame {frame_index} has no mask_path; this pipeline needs per-view "
                 f"foreground masks (see docs/DATA_CONTRACT.md)")
@@ -76,8 +89,19 @@ def prep_views(manifest: dict, serials: list[str], frame_index: int, out_dir: Pa
             assert raw is not None and raw.ndim == 3 and raw.shape[2] == 4, (
                 f"{f['mask_path']}: expected a 4-channel RGBA PNG whose ALPHA is the mask")
             a = raw[..., 3]
-            cv2.imwrite(str(om), (cv2.undistort(a, K0, d, None, Ku) >= 128).astype(np.uint8) * 255)
-        m = cv2.imread(str(om), cv2.IMREAD_GRAYSCALE) >= 128
+            # cv2.imwrite returns False rather than raising -- most often a full filesystem.
+            if not cv2.imwrite(str(oi), cv2.undistort(img, K0, d, None, Ku)):
+                raise RuntimeError(f"{s}: could not write {oi} (is the filesystem full?)")
+            if not cv2.imwrite(str(om),
+                               (cv2.undistort(a, K0, d, None, Ku) >= 128).astype(np.uint8) * 255):
+                raise RuntimeError(f"{s}: could not write {om} (is the filesystem full?)")
+        raw_m = cv2.imread(str(om), cv2.IMREAD_GRAYSCALE)
+        if raw_m is None:
+            raise RuntimeError(
+                f"{s}: wrote {om} but cannot read it back. The file is "
+                f"{om.stat().st_size if om.is_file() else 'missing'} bytes. This usually means the "
+                f"filesystem is full or the write was interrupted; check `df -h` on that path.")
+        m = raw_m >= 128
         return s, dict(undist=oi, mask=om, mask_px=int(m.sum()))
 
     info = {}
