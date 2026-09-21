@@ -128,15 +128,18 @@ Compute nodes are frequently offline. Fetch everything first, then run with `HF_
 
 ```bash
 source env.sh
-orhsurf fetch --weights                # DA3 checkpoint, 6.76 GB
-orhsurf fetch --clip C001              # one clip
+./fetch_ckpts.sh                       # DA3 checkpoint, 6.76 GB (the only model weight)
+orhsurf fetch --clip C001              # downloads + extracts the clip archive
 ```
+
+> `fetch --clip` gets you the raw capture, **not a runnable clip**: the published archive has no
+> `manifest.json` in this pipeline's schema and no foreground masks. See `docs/DATA_CONTRACT.md`.
 
 | What | Size |
 |---|---|
 | DA3NESTED-GIANT-LARGE-1.1 (`model.safetensors`) | **6,759,558,100 B ≈ 6.76 GB** |
 | one clip archive (`data/C0NN.tar`) | ≈ 4.3 GB |
-| whole published dataset | ≈ 77 GiB (17 JPEG clips + 4 HEVC) |
+| whole published dataset | ≈ 77 GiB; all 100 clips are now published |
 
 Pin the revision, do not track `main`:
 `Sulwon/anonymous_dataset_lih_orh_0920`, `repo_type="dataset"`,

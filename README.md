@@ -11,7 +11,7 @@ prep  →  DA3 depth prior @1008 (our poses passed in)  →  AmbiSuR 7k @ -r 2  
 afterwards:
 
 ```bash
-orhsurf run --clip C001 --gpus 8 --frames 0-149
+orhsurf run --clip C001 --gpus 8 --frames 0-224
 ```
 
 When it returns, every frame has a filtered `surface.npz` on disk with a `_DONE.json` marker beside
@@ -25,15 +25,19 @@ This exact command was run on the development machine (2 frames, 2 GPUs) and pro
 clouds:
 
 ```bash
-orhsurf run \
-  --clip <path-to>/manifest_fg.json \
-  --frames 40-41 --gpus 2
+orhsurf run --clip <clip-id-or-path-to-manifest.json> --frames 40-41 --gpus 2
 ```
 
-| frame | points (filtered) | before dedup | dropped: support<2 | dropped: isolated | npz |
-|---|---|---|---|---|---|
-| 00040 | **25,493,841** | 34,647,991 | 4,111,957 | 1,542,567 | 618,408,097 B |
-| 00041 | **25,468,900** | 34,648,862 | 4,112,462 | 1,532,516 | 617,815,052 B |
+| frame | points (filtered) | dropped: support<2 | dropped: isolated |
+|---|---|---|---|
+| 00040 | **25.4 M** (±0.5%) | ~4.11–4.18 M | ~1.54–1.56 M |
+| 00041 | **25.47 M** (±0.05%) | ~4.10–4.11 M | ~1.53–1.57 M |
+
+**These counts are not deterministic.** Three independent runs of frame 40 with identical code and
+inputs gave 25,493,841 / 25,426,861 / 25,366,727 — a **0.50% spread**. AmbiSuR's densification
+samples views in a random order, so the fitted Gaussian count varies run to run (measured 648,689
+to 667,291, a 2.8% spread) and the exported point count follows it. Quote these with a tolerance;
+a sub-percent difference between two runs is not a regression.
 
 `orhsurf verify` → `2/2 frames ok, 50,962,741 points total`. Wall clock 19.5 min for both frames in
 parallel, on a heavily contended box (load average ~65–98 from unrelated jobs).
@@ -43,9 +47,18 @@ Per-frame stage timings (frame 00040): prep 2 s, dataset_build 35 s, scene_build
 
 The DA3 stage reproduced the reference recipe exactly: torch peak **23,353 MiB** (reference:
 23,353 MiB), worst scene-frame coverage **1.00000**, 50,000-point initial cloud. The k-NN gate
-reported `k=5 median 2.419 mm`, and its drop counts land within 1% of the reference frame's.
+reported `k=5 median 2.419 mm`; its drop counts differ from the reference frame's by **+1.25%**
+and **+2.33%** — a different frame, so they are not expected to match exactly.
 
 ## Quick start
+
+**Prerequisite:** `micromamba`, `mamba` or `conda` on `$PATH`. `install.sh` needs it for a pinned
+Python 3.10 *and* for COLMAP (conda-forge ships it; PyPI does not). No root required:
+
+```bash
+curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C "$HOME" bin/micromamba
+export PATH="$HOME/bin:$PATH"
+```
 
 ```bash
 git clone <this repo> orhsurf && cd orhsurf
@@ -53,9 +66,17 @@ git clone <this repo> orhsurf && cd orhsurf
 source env.sh
 
 orhsurf doctor                   # check everything at once
-orhsurf fetch --clip C001        # data from HuggingFace (login node; needs network)
+orhsurf fetch --clip C001        # downloads + extracts the clip archive -- but see the warning below
 orhsurf run --clip C001 --gpus 1 --frames 0-0     # smoke test: one frame, ~11 min
 orhsurf verify --clip C001       # open every output and check it
+
+> **`fetch --clip` does not yet give you a runnable clip.** It downloads and extracts the published
+> archive, then tells you what is missing. The archive has no `manifest.json` in this pipeline's
+> schema and **no foreground masks**, both of which `orhsurf run` requires. There is no converter in
+> this package yet. See [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md).
+
+`--clip` accepts a clip id (resolved under `ORHSURF_DATA_ROOT`), a clip directory, or a path to a
+`manifest.json`. `run` and `verify` accept all three forms.
 ```
 
 On a Slurm cluster read **[docs/INSTALL_SLURM.md](docs/INSTALL_SLURM.md)** first — it covers
@@ -67,10 +88,10 @@ from documented behaviour, not verified on a real cluster.
 
 | | |
 |---|---|
-| **GPU** | **≥ 24 GB.** Set by the DA3 stage (peaks 24,090 MiB), not by training. |
+| **GPU** | **≥ 24 GB.** Set by the DA3 stage (peaks **23,353 MiB** torch-allocated, measured), not by training. The margin on a 24 GB card is ~3%, so another user's process on the same GPU will OOM it; `run` checks free VRAM before dispatching. |
 | CPU | 8 cores per concurrent job is enough (one job uses ~280%) |
 | Disk | ~620 MB per frame (~93 GB per 150-frame clip), plus ~6 GB transient scratch per frame |
-| Time | ~11 min/frame at `-r 2` × 7k. 150 frames on 8 GPUs ≈ 3.5 h |
+| Time | ~11 min/frame at `-r 2` × 7k. A 225-frame published clip on 8 GPUs ≈ 5 h |
 
 A 16 GB GPU does not fit at the default `--group-size 18`. Lowering it works but **changes the
 output** — DA3 predicts jointly over the group. See INSTALL_SLURM.md §0.
@@ -126,8 +147,11 @@ The reference reconstruction was produced on 2.6.0+cu124, so the DA3 stage is pi
 (`env-da3/`) while AmbiSuR keeps 2.7.1+cu128 (`env/`). Reproduce with `tools/da3_env_compare.py`.
 
 **PyTorch3D is not needed.** AmbiSuR imported it for exactly one function; `orhsurf/quat.py`
-replaces it, proven equal to 1.1e-15 in `tests/test_quat.py`. This removes the worst build from the
-install.
+replaces it. `tests/test_quat.py` always checks orthonormality and known rotations, and compares
+against the real PyTorch3D **only when it is importable** — on a machine where it was, the max
+absolute difference was 1.1e-15. `install.sh` does not install PyTorch3D, so on a clean install
+that comparison reports **SKIP**, not PASS: the figure above comes from a development machine, not
+from your install.
 
 ## Durability
 

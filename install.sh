@@ -118,15 +118,36 @@ SMOKE
   "$PD" -m pip install -q torch==2.6.0+cu124 torchvision==0.21.0+cu124 \
         --index-url https://download.pytorch.org/whl/cu124
   "$PD" -m pip install -q xformers==0.0.29.post3 --index-url https://download.pytorch.org/whl/cu124
-  "$PD" -m pip install -q "numpy==2.2.6" "opencv-python==4.11.0.86" "huggingface_hub>=0.34" \
-        "hf-xet" "safetensors" "einops" "e3nn"
+  # ORDER MATTERS. DA3 pins numpy<2, so installing numpy==2.2.6 FIRST and DA3 second let pip
+  # silently downgrade it to 1.26.4 -- a clean install then ran the "numerically delicate" DA3
+  # stage on a different numpy than the reference this package pins the whole env for.
+  # Install DA3 first, then force numpy back, then ASSERT the final version.
   if [ -d "$HERE/third_party/Depth-Anything-3" ]; then
     "$PD" -m pip install -q -e "$HERE/third_party/Depth-Anything-3"
   else
     "$PD" -m pip install -q \
       "git+https://github.com/ByteDance-Seed/Depth-Anything-3@3d835ec1a5802d64a8b8b15f817a1ab54809bfe4"
   fi
+  # `addict` is imported by depth_anything_3/model/da3.py but is NOT in DA3's own `requires`
+  # metadata, so pip never pulls it and EVERY run died with ModuleNotFoundError.
+  "$PD" -m pip install -q "addict" "opencv-python==4.11.0.86" "huggingface_hub>=0.34" \
+        "hf-xet" "safetensors" "einops" "e3nn"
+  "$PD" -m pip install -q --force-reinstall --no-deps "numpy==2.2.6"
   # Upstream pins numpy<2; 2.2.6 is what the reference env has and DA3 imports and runs with it.
+  echo "  verifying the DA3 environment (imports what the pipeline actually imports)"
+  "$PD" - <<'DA3SMOKE'
+import sys
+import numpy
+assert numpy.__version__ == "2.2.6", (
+    f"env-da3 has numpy {numpy.__version__}, expected 2.2.6. The DA3 stage is pinned to a "
+    f"specific numeric stack; a different numpy is not the reference environment.")
+import addict                                    # the undeclared dependency
+from depth_anything_3.api import DepthAnything3  # what orhsurf/stages/da3_prior.py imports
+import torch
+assert torch.__version__.startswith("2.6.0"), f"env-da3 torch {torch.__version__}, expected 2.6.0"
+print(f"  [ok ] env-da3: numpy {numpy.__version__}, torch {torch.__version__}, DA3 API importable")
+DA3SMOKE
+  [ $? -eq 0 ] || { echo "env-da3 is not usable (see above)"; exit 1; }
 fi
 
 # --- CUDA extensions ----------------------------------------------------------------------

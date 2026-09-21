@@ -157,6 +157,39 @@ def physical_gpu_ids() -> list[int]:
     return [str(i) for i in visible_gpus()]
 
 
+def free_vram_mib(device: int) -> int | None:
+    """Free VRAM on a device, or None if it cannot be determined."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+        free, _total = torch.cuda.mem_get_info(device)
+        return int(free / 2 ** 20)
+    except Exception:
+        return None
+
+
+#: DA3 at the default group size peaks at 23,353 MiB. A 24 GB card exposes ~24,200 MiB, so the
+#: margin is ~3% -- another user's 540 MiB process is enough to OOM us, and we used to discover
+#: that only AFTER paying for prep + dataset_build + scene_build (~90 s) and the DA3 model load.
+REQUIRED_FREE_MIB = 23800
+
+
+def usable_gpus(gpus: list, required_mib: int = REQUIRED_FREE_MIB, log=print) -> list:
+    """Drop GPUs that do not have room for the DA3 stage, BEFORE any expensive work starts."""
+    ok, busy = [], []
+    for g in gpus:
+        free = free_vram_mib(g if isinstance(g, int) else 0)
+        if free is None or free >= required_mib:
+            ok.append(g)
+        else:
+            busy.append((g, free))
+    for g, free in busy:
+        log(f"[alloc] skipping gpu {g}: only {free} MiB free, DA3 needs ~{required_mib} MiB "
+            f"(another process is using it)")
+    return ok
+
+
 def contiguous_slices(items: list, n_parts: int) -> list[list]:
     """Partition `items` into `n_parts` CONTIGUOUS slices, preserving order.
 

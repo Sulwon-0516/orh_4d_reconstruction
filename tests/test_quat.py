@@ -7,6 +7,11 @@ from pathlib import Path
 
 import torch
 
+
+class _Skipped(Exception):
+    """Raised when a test could not make its comparison. Reported as SKIP, never as PASS."""
+
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orhsurf.quat import quaternion_to_matrix  # noqa: E402
 
@@ -46,9 +51,12 @@ def test_matches_pytorch3d_if_available():
     try:
         from pytorch3d.transforms import quaternion_to_matrix as p3d
     except Exception as e:                                  # pragma: no cover
-        print(f"  [skip] pytorch3d not importable ({type(e).__name__}); "
-              f"orthonormality tests above still ran")
-        return
+        # This test exists to make ONE comparison. install.sh deliberately does not install
+        # pytorch3d, so on every clean install this skips -- and it used to still print PASS,
+        # which let the README cite "equal to 1.1e-15" on machines that never checked it.
+        # Report SKIP distinctly so the result cannot be read as a proof that did not happen.
+        raise _Skipped(f"pytorch3d not importable ({type(e).__name__}); the equivalence "
+                       f"comparison did NOT run. The orthonormality/known-rotation tests did.")
     torch.manual_seed(1)
     q = torch.randn(4096, 4, dtype=torch.float64)
     q = q[q.norm(dim=-1) > 1e-3]
@@ -59,8 +67,18 @@ def test_matches_pytorch3d_if_available():
 
 
 if __name__ == "__main__":
+    ran = skipped = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"PASS {name}")
-    print("all quaternion tests passed")
+            try:
+                fn()
+            except _Skipped as e:
+                skipped += 1
+                print(f"SKIP {name}: {e}")
+            else:
+                ran += 1
+                print(f"PASS {name}")
+    print(f"{ran} passed, {skipped} SKIPPED")
+    if skipped:
+        print("NOTE: a skipped test proved nothing. The README's pytorch3d equivalence figure "
+              "comes from a machine where pytorch3d WAS installed; this run did not verify it.")

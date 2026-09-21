@@ -136,6 +136,15 @@ def cmd_run(a) -> int:
             return 0
 
     gpus = alloc.resolve_gpus(a.gpus)
+    if not a.no_gpu_check:
+        usable = alloc.usable_gpus(gpus)
+        if not usable:
+            raise SystemExit(
+                f"none of the {len(gpus)} visible GPU(s) has ~{alloc.REQUIRED_FREE_MIB} MiB free; "
+                f"the DA3 stage would OOM after ~90 s of prep.\n"
+                f"  Wait for them to free, request exclusive GPUs, or pass --no-gpu-check to "
+                f"proceed anyway (e.g. with a smaller --group-size).")
+        gpus = usable
     # One budget: the allocation divided by the number of CONCURRENT JOBS (one per GPU).
     cpus_per_job = cpubudget.resolve(a.cpus_per_job, concurrent_jobs=len(gpus))
     cpubudget.apply(cpus_per_job)
@@ -313,9 +322,18 @@ def cmd_worker(a) -> int:
 
 
 def cmd_verify(a) -> int:
-    root = Path(a.out or paths.out_root()).resolve()
-    if a.clip and not a.out:
-        root = paths.out_root() / a.clip
+    # `run` resolves a clip through resolve_clip(), which accepts an id, a directory, or a path to
+    # manifest.json. `verify` used to do `out_root() / a.clip`, and pathlib DISCARDS the left
+    # operand when the right is absolute -- so `verify --clip <path-to-manifest.json>` tried to
+    # list a file as a directory and raised NotADirectoryError. Accept the same three forms.
+    if a.out:
+        root = Path(a.out).resolve()
+    elif a.clip:
+        p = Path(a.clip)
+        clip_id = p.parent.name if p.suffix == ".json" else (p.name if p.exists() else a.clip)
+        root = (paths.out_root() / clip_id).resolve()
+    else:
+        root = paths.out_root().resolve()
     rep = atomicio.verify_tree(root, deep=not a.shallow)
     print(f"[verify] {root}")
     exp = f" (expected {rep['expected']})" if rep.get("expected") is not None else \
@@ -395,11 +413,17 @@ def cmd_doctor(a) -> int:
     # DA3 is installed ONLY in env-da3; probe it with that interpreter.
     da3_py = paths.da3_python()
     if da3_py.is_file():
-        r = subprocess.run([str(da3_py), "-c",
-                            "import depth_anything_3, torch; print(torch.__version__)"],
-                           capture_output=True, text=True)
-        check(f"import depth_anything_3 (da3 env, {da3_py.name})", r.returncode == 0,
-              (r.stdout or r.stderr).strip().splitlines()[-1] if (r.stdout or r.stderr) else "")
+        # Import what the STAGE imports. `import depth_anything_3` alone always succeeds: it is a
+        # namespace package with __file__ is None, so it reported [ok] on an env where every run
+        # then died on `from addict import Dict`. The check must fail where the run fails.
+        probe = ("import numpy, torch, addict; "
+                 "from depth_anything_3.api import DepthAnything3; "
+                 "print(f'numpy {numpy.__version__} torch {torch.__version__}')")
+        r = subprocess.run([str(da3_py), "-c", probe], capture_output=True, text=True)
+        detail = (r.stdout or r.stderr).strip().splitlines()[-1] if (r.stdout or r.stderr) else ""
+        check(f"DA3 stage imports (da3 env)", r.returncode == 0, detail)
+        if r.returncode == 0 and "numpy 2.2.6" not in r.stdout:
+            check("env-da3 numpy == 2.2.6 (the pinned reference stack)", False, detail)
     else:
         check(f"DA3 interpreter at {da3_py}", False, "run install.sh")
     if want_ext:
@@ -472,6 +496,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--keep-work", action="store_true", help="keep per-frame scratch for debugging")
     r.add_argument("--force", action="store_true", help="redo frames that are already complete")
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--no-gpu-check", action="store_true", dest="no_gpu_check",
+                   help="dispatch even onto GPUs that look too full for the DA3 stage")
     r.add_argument("--cpus-per-job", type=int, default=None, dest="cpus_per_job",
                    help="CPU budget for EACH concurrent job. Default: the allocation divided by "
                         "the number of GPUs. Applied to OMP/MKL/BLAS before any numeric import, "
