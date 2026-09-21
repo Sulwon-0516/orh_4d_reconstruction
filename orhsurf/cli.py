@@ -499,8 +499,14 @@ def cmd_view(a) -> int:
         clip_id = p.parent.name if p.suffix == ".json" else (p.name if p.exists() else a.clip)
         npz = viewer.find_frame(Path(a.out).resolve() if a.out
                                 else (paths.out_root() / clip_id).resolve(), a.frame)
+    variants = {}
+    for spec in a.variant:
+        label, sep, path = spec.partition('=')
+        if not sep or not label or label == 'Original' or label in variants:
+            raise SystemExit('--variant requires a unique LABEL=PATH (Original is reserved)')
+        variants[label] = Path(path)
     return viewer.serve(npz, manifest, port=a.port, host=a.host,
-                        point_size=a.point_size, budget=a.budget)
+                        point_size=a.point_size, budget=a.budget, variants=variants)
 
 
 def cmd_render(a) -> int:
@@ -626,6 +632,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="manifest for camera centres (enables the `facing` mode); "
                         "inferred from --clip when possible")
     v.add_argument("--out", default=None, help="output root, if not the default")
+    v.add_argument("--variant", action="append", default=[], metavar="LABEL=PATH",
+                   help="additional NPZ to compare using the version dropdown; repeatable")
     v.add_argument("--port", type=int, default=8080)
     v.add_argument("--host", default="0.0.0.0",
                    help="0.0.0.0 so a cluster node is reachable through an SSH tunnel")

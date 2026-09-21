@@ -215,6 +215,32 @@ unknown-direction bin. See [library alternatives](detail.md#point-cloud-simplifi
 Keeping the original and all three versions adds storage; savings require choosing which derived
 version to retain later. Nothing deletes the original automatically.
 
+For a simple random baseline, use the same exporter with `--method random`:
+
+```bash
+"$ORHSURF_PYTHON" -m orhsurf.simplify --source out/C001/00000 --out out/C001_random \
+  --method random --targets 10000000,5000000,1000000 --cpus 2
+```
+
+This selects original points uniformly without replacement with a fixed seed. It does not enforce
+uniform spatial spacing or use neighbours/normals. All attributes remain paired with their point.
+Viser's existing `points drawn` also uses a fixed random permutation; it only changes what is drawn,
+not file size. Creating all variants for evaluation adds storage until a retention choice is made.
+
+Compare saved versions in the **same viser session and camera**:
+
+```bash
+orhsurf view --npz out/C001/00000/surface.npz --host 127.0.0.1 --port 8080 --budget '1 M' \
+  --variant 'Normal 1M=out/C001_simplified/1M/00000/surface.npz' \
+  --variant 'Random 1M=out/C001_random/1M/00000/surface.npz'
+```
+
+Repeat `--variant LABEL=PATH` for 5M/10M files too. The **version** dropdown preserves the camera,
+colour mode and point size. **Stored** is the file's full point count; **drawn** is the display budget
+(after support filtering). For a full 1M-vs-1M comparison, select 1M or ALL. A 1M display cap on a
+10M file shows only a random preview of it. Larger budgets increase browser memory/network use.
+Variants load on demand and the server keeps only two loaded selections in memory.
+
 ## Cameras and matching RGB frames
 
 For reconstruction, keep **all 47 valid C001 cameras** and the default DA3 groups (18 views,

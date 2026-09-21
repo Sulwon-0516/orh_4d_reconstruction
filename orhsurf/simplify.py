@@ -117,6 +117,8 @@ def main():
     parser.add_argument('--source', type=Path, required=True, help='completed source frame directory')
     parser.add_argument('--out', type=Path, required=True, help='new derived-output root')
     parser.add_argument('--targets', default='10000000,5000000,1000000')
+    parser.add_argument('--method', choices=('normal-voxel', 'random'), default='normal-voxel')
+    parser.add_argument('--seed', type=int, default=0, help='random subsampling seed')
     parser.add_argument('--normal-angle', type=float, default=30)
     parser.add_argument('--search-steps', type=int, default=12)
     parser.add_argument('--cpus', type=int, default=2)
@@ -150,20 +152,27 @@ def main():
         if dest.exists() or dest == source:
             raise FileExistsError(f'refusing to overwrite {dest}')
         start = time.monotonic()
-        indices, info = select_points(arrays['xyz'], arrays['normal'], arrays['support'], target,
-                                      args.normal_angle, args.search_steps)
-        info.update(method='normal-aware voxel, max-support representative, seeded budget trim',
+        if args.method == 'random':
+            indices = np.random.default_rng(args.seed).choice(n, target, replace=False)
+            indices.sort()
+            info = dict(seed=args.seed)
+            method = 'uniform random sample without replacement'
+        else:
+            indices, info = select_points(arrays['xyz'], arrays['normal'], arrays['support'], target,
+                                          args.normal_angle, args.search_steps)
+            method = 'normal-aware voxel, max-support representative, seeded budget trim'
+        info.update(method=method,
                     source=str(source_npz), source_bytes=source_npz.stat().st_size,
                     source_n_points=n, n_points=target, search_seconds=time.monotonic()-start,
                     attributes='unmodified source representatives; no averaging or support union',
                     independent_lod=True)
-        with atomicio.FrameStage(dest, fingerprint=dict(derived_from=str(source), target=target)) as stage:
+        with atomicio.FrameStage(dest, fingerprint=dict(derived_from=str(source), target=target, method=args.method, seed=args.seed)) as stage:
             atomicio.atomic_savez(stage.path/'surface.npz', **{k:a[indices] for k,a in arrays.items()})
             stage.record('surface.npz', n_points=target)
             atomicio.atomic_write_json(stage.path/'surface_export.json', info)
             atomicio.atomic_write_json(stage.path/'provenance.json', dict(operation='simplify', **info))
             metadata = json.loads((source/'metadata.json').read_text())
-            metadata.update(method='normal-aware voxel representatives', source_surface=str(source_npz))
+            metadata.update(method=method, source_surface=str(source_npz))
             atomicio.atomic_write_json(stage.path/'metadata.json', metadata)
         report = atomicio.verify_frame(dest, deep=True)
         if not report['ok']:
