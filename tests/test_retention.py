@@ -28,7 +28,7 @@ class RetentionTests(unittest.TestCase):
         return out,manifest,rgb,mask,spec
 
     def test_bare_simplify_cli_defaults_to_two_random_budgets(self):
-        from orhsurf import cli
+        from orhsurf import cli, process
         args=cli.build_parser().parse_args(['process','--clips','C001','--simplify'])
         self.assertEqual(args.simplify,'1M,5M')
         self.assertEqual(args.simplify_method,'random')
@@ -70,11 +70,13 @@ class RetentionTests(unittest.TestCase):
 
     def test_sbatch_script_executes_retained_process_with_forwarded_options(self):
         import os,sys,shlex,subprocess
-        from orhsurf import cli
+        from orhsurf import cli, process
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             out,manifest,rgb,mask,spec=self.setup_clip(root)
-            spec['recipe_hash']=cli.recipe_from_args(cli.build_parser().parse_args(['process','--clips','C001'])).hash()
+            # process.resolve_recipe, not cli.recipe_from_args: `process` substitutes the default
+            # preset itself, so asking cli directly describes a different reconstruction.
+            spec['recipe_hash']=process.resolve_recipe(cli.build_parser().parse_args(['process','--clips','C001'])).hash()
             retention.finish(out,spec)
             fake=root/'checkout';(fake/'orhsurf').mkdir(parents=True);(fake/'bin').mkdir()
             (fake/'orhsurf/cli.py').touch();(fake/'env.sh').write_text(':\n')

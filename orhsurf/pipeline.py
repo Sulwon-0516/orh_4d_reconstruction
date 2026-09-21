@@ -30,18 +30,33 @@ PRESETS = {
     "quality":   dict(iterations=7000, densify_from_iter=500, densification_interval=100),
     "balanced":  dict(iterations=3000, densify_from_iter=500, densification_interval=100),
     "economy":   dict(iterations=2000, densify_from_iter=500, densification_interval=80),
+    # WARNING, and it is not visible anywhere in the recipe: train.py:379 gates the DEPTH loss on
+    # a HARDCODED `if iteration > 1000`, with the uncertainty loss nested inside it. Nothing in
+    # these presets moves that number. So:
+    #   draft (1000 it)          -- the DA3 depth prior NEVER supervises training. It still pays
+    #                               for the DA3 stage, then trains as plain photometric 3DGS.
+    #   economy/fast (2000 it)   -- depth supervises iterations 1001-2000, i.e. HALF the budget.
+    #   balanced (3000)/quality (7000) -- 67% / 86% of the budget.
+    # The uncertainty loss is doubly gated: warmup_from_iter puts it at 0.4x the budget (800 at
+    # 2000), but the enclosing `> 1000` means it cannot start before 1001 regardless.
+    # This is not "draft is fast because it trains less" -- it is a different objective. Do not
+    # read draft's support number as the same quantity as the others'.
     "draft":     dict(iterations=1000, densify_from_iter=500, densification_interval=100),
     # `fast` is the only preset that changes the RASTER, and so the only one that must also move
     # the isolation threshold. A point is one pixel of one camera's rendered depth, so -r 4 gives a
     # cloud about 4x sparser and the k=5 nearest-neighbour distance roughly doubles: measured
     # median 2.42 mm at -r 2 against 4.985 mm at -r 4. Leaving nn_max_mm at 5.0 there puts the
-    # threshold on top of the median, and the export refuses (it would drop 51.2% of the cloud).
+    # threshold on top of the median, and the export refuses (isolation AND the min-views gate
+    # together would drop 51.2% of the cloud; the two were not separated).
     #
     # NOTE, because the two signals disagree: by `support` alone, -r 4 with a 5 mm threshold scores
-    # HIGHER (9.39) than with 10 mm (7.70) -- the points 5 mm rescues are genuinely poor ones. The
-    # 10 mm value is here because the clouds were compared in 3D and 10 mm was judged the better
-    # surface. support is a proxy; the 3D reading decides. Both numbers are in the README so the
-    # disagreement is visible rather than tidied away.
+    # HIGHER (9.39) than with 10 mm (7.70). Careful with that -- mean support is taken over the
+    # SURVIVORS, so dropping points raises it mechanically. The honest reading is arithmetic on the
+    # recovered subset: the 2.30 M points 10 mm keeps average ~4.51 support, i.e. lower agreement
+    # on average, which is not the same as "each one is bad" and is not a geometry measurement.
+    # The 10 mm value is here because the clouds were compared in 3D and 10 mm was judged the
+    # better surface. support is a proxy; the 3D reading decides. Both numbers are in the README
+    # so the disagreement is visible rather than tidied away.
     "fast":      dict(iterations=2000, densify_from_iter=500, densification_interval=80,
                       resolution=4, nn_max_mm=10.0),
 }

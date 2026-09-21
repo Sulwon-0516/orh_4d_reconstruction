@@ -181,3 +181,90 @@ class ProcessTests(unittest.TestCase):
                 self.assertEqual(batches[1],list(range(113,225)))
 
 if __name__=='__main__': unittest.main()
+
+
+class RecipeDispatchTests(unittest.TestCase):
+    """`process` must reconstruct the recipe it was asked for, and say so in the receipt.
+
+    It used to build the inner `run` namespace from a fixed argv carrying only paths, frames and
+    allocation, so every recipe option stopped at the `process` boundary. That was invisible while
+    `run` and `process` shared a default, and became "every batch run is secretly -r 4" the moment
+    they diverged. These tests fail if the two ever drift apart again.
+    """
+
+    def inner_for(self, *argv):
+        p = cli.build_parser()
+        outer = p.parse_args(['process', '--clips', 'C001'] + list(argv))
+        recipe = process.resolve_recipe(outer)
+        inner = p.parse_args(['run', '--clip', 'x', '--frames', '0-0', '--gpus', '1',
+                              '--cpus-per-job', '8', '--out', 'o', '--shard', '0', '--shards', '1'])
+        process._forward_recipe(recipe, inner, cli)
+        return recipe, cli.recipe_from_args(inner)
+
+    def test_every_recipe_option_survives_dispatch(self):
+        for argv in ([], ['--preset', 'quality'], ['--preset', 'draft'],
+                     ['--preset', 'economy', '--resolution', '1'],
+                     ['--iterations', '2500'], ['--nn-max-mm', '7.5'], ['--group-size', '12'],
+                     ['--densify-from-iter', '300', '--densification-interval', '50']):
+            with self.subTest(argv=argv):
+                requested, executed = self.inner_for(*argv)
+                self.assertEqual(requested.hash(), executed.hash())
+                self.assertEqual(requested.resolution, executed.resolution)
+                self.assertEqual(requested.iterations, executed.iterations)
+                self.assertEqual(requested.nn_max_mm, executed.nn_max_mm)
+
+    def test_fast_default_moves_resolution_and_threshold_together(self):
+        requested, executed = self.inner_for()
+        self.assertEqual((executed.resolution, executed.nn_max_mm), (4, 10.0))
+        self.assertEqual(requested.hash(), executed.hash())
+
+    def test_quality_is_not_silently_downgraded(self):
+        _, executed = self.inner_for('--preset', 'quality')
+        self.assertEqual((executed.iterations, executed.resolution, executed.nn_max_mm),
+                         (7000, 2, 5.0))
+
+    def test_every_settable_field_is_forwardable(self):
+        # A field added to RECIPE_FLAGS without a matching `run` option would be dropped silently.
+        run_args = cli.build_parser().parse_args(['run', '--clip', 'x'])
+        for field in cli.RECIPE_FLAGS:
+            self.assertTrue(hasattr(run_args, field), f'orhsurf run cannot set {field}')
+
+    def test_smoke_forces_quality_and_refuses_conflicts(self):
+        p = cli.build_parser()
+        self.assertEqual(process.resolve_recipe(
+            p.parse_args(['process', '--clips', 'C001', '--smoke'])).iterations, 7000)
+        for argv in (['--preset', 'fast'], ['--preset', 'quality'], ['--iterations', '500'],
+                     ['--nn-max-mm', '8'], ['--resolution', '4']):
+            with self.subTest(argv=argv):
+                a = p.parse_args(['process', '--clips', 'C001', '--smoke'] + argv)
+                a.gpus = 0  # stop at the next check; the smoke gate must fire before any work
+                with self.assertRaises(SystemExit) as cm:
+                    process.run(a)
+                self.assertIn('--smoke always runs the full quality recipe', str(cm.exception))
+
+    def test_run_actually_forwards_the_recipe_to_cmd_run(self):
+        """The end-to-end guard: the other tests call _forward_recipe themselves, so they would
+        still pass if `run` stopped calling it. Capture what cmd_run really receives."""
+        seen = {}
+        def capture(args):
+            seen['recipe'] = cli.recipe_from_args(args)
+            return 0
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); p = root/'C001_first150_prepared/manifest.json'; manifest(p, 150)
+            for argv, expect in ((['--preset', 'quality'], (7000, 2, 5.0)),
+                                 ([], (2000, 4, 10.0)),
+                                 (['--preset', 'economy', '--nn-max-mm', '3.5'], (2000, 2, 3.5))):
+                with self.subTest(argv=argv):
+                    seen.clear()
+                    a = cli.build_parser().parse_args(
+                        ['process', '--clips', 'C001', '--gpus', '1', '--cpus-per-job', '1',
+                         '--out-root', str(root/'out')] + argv)
+                    with patch('orhsurf.alloc.resolve_gpus', return_value=[0]), \
+                         patch('orhsurf.cli.cmd_doctor', return_value=0), \
+                         patch('orhsurf.paths.data_root', return_value=root), \
+                         patch('orhsurf.process.fetch.fetch_weights', return_value=0), \
+                         patch('orhsurf.cli.cmd_verify', return_value=0), \
+                         patch('orhsurf.cli.cmd_run', side_effect=capture):
+                        self.assertEqual(process.run(a), 0)
+                    r = seen['recipe']
+                    self.assertEqual((r.iterations, r.resolution, r.nn_max_mm), expect)

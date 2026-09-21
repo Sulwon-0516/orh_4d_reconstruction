@@ -62,6 +62,56 @@ def prepare(clip: str, data_root: Path, smoke: bool = False, all_frames: bool = 
     return manifest
 
 
+def resolve_recipe(a):
+    """The recipe `process` will ACTUALLY execute for these arguments.
+
+    `cli.recipe_from_args` is not enough on a `process` namespace, because `process` makes two
+    substitutions of its own: `--preset` defaults to None there (so `--smoke` can tell an explicit
+    choice from silence) and `--smoke` forces quality.  Anything that needs to know what a batch
+    run will do -- retention identity, the log line, a test -- must ask HERE, or it will describe
+    a different reconstruction than the one that runs.
+    """
+    import argparse
+    from . import cli
+    b = argparse.Namespace(**vars(a))
+    if getattr(b, 'smoke', False):
+        b.preset = 'quality'
+    elif getattr(b, 'preset', None) is None:
+        b.preset = cli.DEFAULT_PRESET
+    return cli.recipe_from_args(b)
+
+
+def _forward_recipe(recipe, args, cli) -> None:
+    """Carry the resolved recipe onto the `run` namespace, and PROVE it arrived.
+
+    `run` and `process` have separate parsers, and `process` used to build the inner namespace
+    from a fixed argv listing only paths, frames and allocation.  Every recipe option therefore
+    stopped at the `process` boundary: `process --preset quality --resolution 1` logged quality
+    and then reconstructed at whatever `run`'s own default happened to be.  That was invisible
+    while both defaults were `quality`; making `fast` the default turned it into every batch and
+    Slurm run silently reconstructing at -r 4.
+
+    Worse, the retention receipt hashed the REQUESTED recipe while the frames carried the
+    executed one, so a `--cleanup-decoded` run could delete its inputs and leave a receipt
+    describing a reconstruction that never happened.  Retention now hashes this same object.
+
+    Only cli.RECIPE_FLAGS -- the fields a user can actually set -- are forwarded; every other
+    Recipe field is fixed and keeps the same dataclass default on both sides.  The hash check is
+    the real guarantee, and it fails loudly rather than reconstructing the wrong thing.
+    """
+    args.preset = None  # the resolved values below ARE the preset; applying it twice hides typos
+    for field in cli.RECIPE_FLAGS:
+        if not hasattr(args, field):
+            raise AssertionError(
+                f"orhsurf run has no --{field.replace('_','-')}, so `process` cannot forward it. "
+                f"Add the option to the run parser; otherwise batch reconstructions silently "
+                f"ignore it.")
+        setattr(args, field, getattr(recipe, field))
+    got = cli.recipe_from_args(args)
+    if got.hash() != recipe.hash():
+        raise AssertionError(f'recipe did not survive dispatch: asked {recipe}, run would use {got}')
+
+
 def run(a) -> int:
     from . import cli
     from . import retention
@@ -104,6 +154,23 @@ def run(a) -> int:
     # Validate the entire request before any downloads or work; no paths/globs as clip IDs.
     if len(set(a.clips)) != len(a.clips) or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', c) for c in a.clips):
         raise SystemExit('--clips requires unique clip IDs, e.g. C001 C002 C003')
+    if getattr(a, 'smoke', False):
+        # A smoke run exists to prove the install and the data, so it uses the FULL quality recipe
+        # whatever the batch default is -- otherwise "the smoke test passed" would say nothing
+        # about a quality run.  That promise has to be unconditional: the old code promoted only
+        # an absent/economy/fast preset, so `--smoke --preset draft` quietly smoke-tested draft,
+        # contradicting both its own comment and the README.  Refuse the conflict instead, and
+        # refuse it HERE, before any download -- the file's rule is to validate the whole request
+        # before doing work.
+        conflicting = [n for n in ('preset', 'iterations', 'resolution', 'nn_max_mm',
+                                   'densify_from_iter', 'densification_interval')
+                       if getattr(a, n, None) is not None]
+        if conflicting:
+            raise SystemExit('--smoke always runs the full quality recipe, so it cannot be combined '
+                             'with ' + ', '.join('--'+n.replace('_', '-') for n in conflicting)
+                             + '. Drop those, or drop --smoke and run the recipe you want.')
+    if getattr(a, 'preset', None) is None:
+        a.preset = cli.DEFAULT_PRESET
     if a.gpus < 1:
         raise SystemExit('--gpus must be >= 1')
     available = alloc.resolve_gpus(None)
@@ -134,20 +201,14 @@ def run(a) -> int:
     all_frames = getattr(a, 'all_frames', False)
     if smoke:
         root = root / '_smoke'
-        # A smoke run exists to prove the install and the data, so it uses the FULL recipe even
-        # when the batch default is economy -- otherwise "the smoke test passed" would say nothing
-        # about a quality run. An explicit --preset/--iterations still wins.
-        if getattr(a, 'preset', None) in (None, 'economy', 'fast') and getattr(a, 'iterations', None) is None:
-            a.preset = 'quality'
-        r = cli.recipe_from_args(a)
-        print(f'[process] smoke: frame 0 only, preset {getattr(a, "preset", "quality")} '
-              f'({r.iterations} it, densify {r.densify_from_iter}/{r.densification_interval}); '
-              f'separate outputs', flush=True)
-    else:
-        r = cli.recipe_from_args(a)
-        print(f'[process] preset {getattr(a, "preset", None) or "quality"}: {r.iterations} it, '
-              f'-r {r.resolution}, densify {r.densify_from_iter}/{r.densification_interval}',
-              flush=True)
+        a.preset = 'quality'  # refused above if that conflicts with an explicit option
+    # ONE resolved recipe for this invocation.  Everything downstream -- the log line, the actual
+    # reconstruction, and the retention receipt -- must come from this object and nothing else.
+    recipe = resolve_recipe(a)
+    label = 'smoke: frame 0 only, quality' if smoke else f'preset {getattr(a, "preset", None) or "quality"}'
+    print(f'[process] {label}: {recipe.iterations} it, -r {recipe.resolution}, '
+          f'densify {recipe.densify_from_iter}/{recipe.densification_interval}, '
+          f'isolation {recipe.nn_max_mm} mm', flush=True)
     for i, clip in enumerate(a.clips, 1):
         print(f'[process] {i}/{len(a.clips)}: {clip}', flush=True)
         out = root/clip
@@ -160,7 +221,7 @@ def run(a) -> int:
                  if smoke else ('full' if all_frames else f'first{frame_limit}'))
             manifest = paths.data_root()/f'{clip}_{selection}_prepared/manifest.json'
             selected = cli.parse_frames(full_frames(manifest, smoke, all_frames, frame_limit))
-            spec = retention.identity(manifest, cli.recipe_from_args(a).hash(), selected, targets, method, only, cleanup)
+            spec = retention.identity(manifest, recipe.hash(), selected, targets, method, only, cleanup)
             if receipt['identity'] != spec:
                 raise RuntimeError(f'{out}: retained run settings differ; use a distinct output root')
             retention.finish(out, spec)
@@ -171,6 +232,7 @@ def run(a) -> int:
         args = parser.parse_args(['run','--clip',str(manifest),'--frames',frames,
                                   '--gpus',str(len(gpus)),'--cpus-per-job',str(budget),'--out',str(out),
                                   '--shard','0','--shards','1'])
+        _forward_recipe(recipe, args, cli)
         rc = cli.cmd_run(args)
         if rc:
             print(f'[process] {clip} reconstruction failed; stopping (exit {rc})', flush=True)
@@ -188,7 +250,7 @@ def run(a) -> int:
                                 '--targets', simplify_targets, '--method', method,
                                 '--cpus', str(budget), '--resume'])
         if only or cleanup:
-            spec = retention.identity(manifest, cli.recipe_from_args(a).hash(), cli.parse_frames(frames),
+            spec = retention.identity(manifest, recipe.hash(), cli.parse_frames(frames),
                                       targets, method, only, cleanup)
             retention.finish(out, spec)
         print(f'[process] {clip} complete and verified: {out}', flush=True)

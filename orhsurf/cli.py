@@ -76,6 +76,17 @@ def resolve_clip(clip: str) -> Path:
         f"  to fetch the clip:  orhsurf fetch --clip {clip}")
 
 
+#: Recipe fields a user can set from the command line. Everything else in Recipe is fixed, so a
+#: field absent here keeps its dataclass default on BOTH sides and stays consistent. `process`
+#: forwards exactly this list (process._forward_recipe) and then checks the resulting hash.
+#: What `orhsurf run` and `orhsurf process` use when no --preset is given.
+DEFAULT_PRESET = "fast"
+
+RECIPE_FLAGS = ("resolution", "iterations", "min_views", "nn_k", "nn_max_mm",
+                "consistency_mm", "group_size", "write_ply",
+                "densify_from_iter", "densification_interval")
+
+
 def recipe_from_args(a) -> "object":
     from .pipeline import Recipe, PRESETS
     r = Recipe()
@@ -87,9 +98,7 @@ def recipe_from_args(a) -> "object":
             raise SystemExit(f"unknown --preset {name!r}; choose from {', '.join(PRESETS)}")
         for k, v in PRESETS[name].items():
             setattr(r, k, v)
-    for k in ("resolution", "iterations", "min_views", "nn_k", "nn_max_mm",
-              "consistency_mm", "group_size", "write_ply",
-              "densify_from_iter", "densification_interval"):
+    for k in RECIPE_FLAGS:
         v = getattr(a, k, None)
         if v is not None:
             setattr(r, k, v)
@@ -548,7 +557,9 @@ def build_parser() -> argparse.ArgumentParser:
     whole = sub.add_parser("process", help="download, prepare, reconstruct and verify clips sequentially (first 150 frames by default)")
     whole.add_argument("--clips", nargs="+", required=True, help="clip IDs in execution order, e.g. C001 C002")
     whole.add_argument("--gpus", type=int, default=1, help="GPUs on this node; parallel frames within each clip, sequential clips")
-    whole.add_argument("--preset", default="fast",
+    # default None, not "fast", so --smoke can tell "the user asked for fast" from "nobody said".
+    # process.run substitutes DEFAULT_PRESET once the smoke gate has run.
+    whole.add_argument("--preset", default=None,
                        help="speed/quality point (default: fast). quality 7000 it | balanced "
                             "3000 | economy 2000 + 500/80 densify | draft 1000 | fast (-r 4, "
                             "quarter the points, 10 mm isolation). See README.")
@@ -557,6 +568,14 @@ def build_parser() -> argparse.ArgumentParser:
     whole.add_argument("--densify-from-iter", type=int, default=None, dest="densify_from_iter")
     whole.add_argument("--densification-interval", type=int, default=None,
                        dest="densification_interval")
+    # `fast` moves the isolation threshold with the raster, so a batch run that changes the
+    # resolution needs to be able to move the threshold too; and --group-size is the knob for a
+    # card smaller than 24 GB. Both reach the reconstruction via process._forward_recipe.
+    whole.add_argument("--nn-max-mm", type=float, default=None, dest="nn_max_mm",
+                       help="isolation threshold; overrides --preset (fast sets 10.0)")
+    whole.add_argument("--group-size", type=int, default=None, dest="group_size",
+                       help="DA3 views per batch (default 17, ~24 GB). Lower it for a smaller "
+                            "GPU, but note it CHANGES the prior.")
     whole.add_argument("--out-root", default=None, help="results under <root>/<clip>/<frame>; default out/")
     whole.add_argument("--cpus-per-job", type=int, default=None, help="thread limit within the existing allocation")
     whole.add_argument("--smoke", action="store_true", help="frame 0 only at full quality; isolated inputs and out/_smoke/<clip>")
@@ -589,7 +608,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "of the frame list. Defaults to SLURM_ARRAY_TASK_ID.")
     r.add_argument("--shards", type=int, default=None,
                    help="total number of array tasks. Defaults to SLURM_ARRAY_TASK_COUNT.")
-    r.add_argument("--preset", default="fast",
+    r.add_argument("--preset", default=DEFAULT_PRESET,
                    help="speed/quality point: quality (7000 it, support 10.21, 692 s/frame) | balanced "
                         "(3000, 9.38, 343 s) | economy (2000 + 500/80 densify, 9.07, 261 s) | "
                         "draft (1000, 7.90, 198 s) | fast (-r 4 + 2000 it + 10 mm isolation, 151 s, "

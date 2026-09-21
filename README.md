@@ -19,7 +19,7 @@ inputs as needed, prepares them, reconstructs them, and verifies all expected ou
 | `--simplify 5M --simplify-only` | Override the point budgets: retain only 5M. Comma-separated budgets also work, e.g. `--simplify 1M,5M`. |
 | `--simplify-method random` | Default sampling method. Alternatives: `stratified` or `normal-voxel`. Requires `--simplify` or `--simplify-only` to produce derivatives. |
 | `--cleanup-decoded` | After successful clip verification, delete generated RGB and automatic-mask PNGs. Preserve source videos, calibration, manifests and supplied masks. Default: keep decoded inputs. |
-| `--smoke` | Test only frame 0 with unchanged reconstruction quality, under separate `_smoke/` outputs. |
+| `--smoke` | Test only frame 0 at the full `quality` recipe, under separate `_smoke/` outputs. Refuses recipe overrides. |
 | `--all-frames` | Process every encoded frame; cannot be combined with `--durations`. |
 | `--array=0-99%10` | **sbatch option**: 100 clip tasks, at most 10 running concurrently. Match the index range to the number of clip IDs. |
 | `MODEL_OUTPUT_DIR` | Export the approved output root for sbatch. For direct `orhsurf process`, use `--out-root /your/output/root` (default: `out/`). |
@@ -470,10 +470,46 @@ development ORH clip, not C001), same scene and same export filter, so only trai
 would not tell you anything about a quality run. Pass `--preset quality` for the full recipe.
 
 ```bash
-sbatch --array=0-3%2 slurm/process_clips.sbatch C001 C002 C003 C004              # economy
+sbatch --array=0-3%2 slurm/process_clips.sbatch C001 C002 C003 C004              # fast (default)
 sbatch --array=0-3%2 slurm/process_clips.sbatch --preset quality C001 C002       # full
 orhsurf process --clips C001 --preset balanced --gpus 8
 ```
+
+`process` and the sbatch script forward `--preset`, `--iterations`, `--resolution`,
+`--densify-from-iter`, `--densification-interval`, `--nn-max-mm` and `--group-size`. A batch run
+that changes `--resolution` must move `--nn-max-mm` with it, for the reason below.
+
+Because `--smoke` always means quality, it **refuses** to be combined with any of the
+reconstruction options above rather than silently winning or silently losing against them:
+
+```
+$ orhsurf process --clips C001 --smoke --preset draft
+--smoke always runs the full quality recipe, so it cannot be combined with --preset.
+Drop those, or drop --smoke and run the recipe you want.
+```
+
+<details><summary>This was broken until 2026-09-21, and silently</summary>
+
+`process` built the inner `run` invocation from a fixed argument list carrying only the clip,
+frames and GPU/CPU allocation. Every recipe option stopped at that boundary: `process --preset
+quality --resolution 1` logged quality and then reconstructed with whatever `run`'s own default
+was. It was invisible while both defaults were `quality` — the log and the output agreed by
+coincidence. Making `fast` the default broke the coincidence, and **every batch and Slurm run
+silently reconstructed at `-r 4`**, including `--smoke`.
+
+The retention receipt made it worse: it hashed the *requested* recipe while the frames recorded
+the *executed* one, so a `--cleanup-decoded` run could delete its own inputs and leave behind a
+receipt describing a reconstruction that never happened.
+
+Both now come from one resolved object (`process.resolve_recipe`), forwarded by
+`process._forward_recipe`, which re-derives the recipe from the arguments it just wrote and raises
+if the hash differs. Regression tests: `tests/test_process.py::RecipeDispatchTests` and
+`ProcessTests::test_run_actually_forwards_the_recipe_to_cmd_run` — the latter drives the real
+`process.run` and inspects what `cmd_run` receives, so it still fails if `run` stops forwarding.
+Found by an independent review, not by the test suite; no receipt written before this date can be
+trusted to describe its output's recipe.
+
+</details>
 
 | preset | iterations | densify | gaussians | support | wall/frame |
 |---|---|---|---|---|---|
@@ -557,6 +593,32 @@ meaningfully changing the output. Going further is counterproductive: at 8 the p
 makes DA3 *slower* than at 17. Pass `--group-size 18` to reproduce the reference exactly on a card
 with room for it.
 
+### The depth prior does not supervise the whole run, and in `draft` it never does
+
+`third_party/AmbiSuR/train.py:379` gates the depth loss on a **hardcoded** `if iteration > 1000`,
+with the uncertainty loss nested inside that same block. No recipe field moves it, so shortening
+the budget does not scale it — it clips it:
+
+| preset | iterations | iterations with depth supervision | share |
+|---|---|---|---|
+| `draft` | 1000 | **0** | **none** |
+| `economy`, `fast` | 2000 | 1001–2000 | 50% |
+| `balanced` | 3000 | 1001–3000 | 67% |
+| `quality` | 7000 | 1001–7000 | 86% |
+
+**`draft` therefore pays the full DA3 cost and then trains as plain photometric 3DGS**, never using
+the prior it computed. That is a different objective, not merely a shorter one, so `draft`'s
+support number is not the same quantity as the others' — do not rank it against them. `fast`, the
+default, gets the prior for half its budget.
+
+The uncertainty loss is gated twice: `warmup_from_iter` puts it at 0.4× the budget (800 at 2000
+iterations), but the enclosing `> 1000` means it cannot start before 1001 whatever the warmup says.
+
+This is recorded, not fixed. Changing the gate changes every output and invalidates the measured
+table above, so it needs its own before/after comparison in 3D from two separated cameras — not a
+one-line edit. **Unverified:** whether raising `draft` above 1000, or scaling the gate with the
+budget, actually improves either.
+
 ### `fast`: a quarter of the points, and why the threshold has to move with the raster
 
 A point is one **pixel** of one camera's rendered depth, so `-r 4` produces a cloud roughly 4x
@@ -569,6 +631,11 @@ AssertionError: the isolation gate would drop 51.2% of the cloud; nn-k=5 nn-max-
 is wrong for this point density (k=5 distance median 4.985 mm)
 ```
 
+That 51.2% is the **combined** loss of both gates — isolated *or* below `--min-views` — measured
+where they are applied together (`orhsurf/_vendor/export_surface.py:232`). It is the right number
+for "would this export throw away half the cloud", and the wrong number to attribute entirely to
+point spacing; the two contributions were never separated.
+
 **The two signals disagree here, and the disagreement is left visible on purpose.** By `support`
 alone, `-r 4` with a 5 mm threshold scores *higher* than with 10 mm:
 
@@ -577,15 +644,35 @@ alone, `-r 4` with a 5 mm threshold scores *higher* than with 10 mm:
 | `--nn-max-mm 5` | 4,340,511 | 2,582,417 | **9.39** |
 | `--nn-max-mm 10` | 6,636,905 | 286,023 | 7.70 |
 
-So the 2.58 M points that 5 mm removes really are the poorer ones — that is not an artefact.
-`fast` uses 10 mm anyway, because the clouds were compared in 3D and 10 mm was judged the better
-surface. `support` is a proxy and the 3D reading decides; both numbers are here so a later reader
+**Read that table carefully — it says less than it looks like it says.** Mean support is computed
+over the *survivors*, so removing low-support points raises it mechanically; the two rows are not
+a like-for-like comparison. What the numbers do support is arithmetic on the recovered subset: the
+2,296,394 points that 10 mm keeps and 5 mm discards average about **4.51** support. That is lower
+average camera agreement for the recovered points. It is *not* evidence that each of them is bad,
+and it is not a measurement of geometry — a cloud can lose real surface and still post a higher
+mean. `fast` uses 10 mm because the clouds were compared in 3D and 10 mm was judged the better
+surface; `support` is a proxy and the 3D reading decides. Both numbers are here so a later reader
 can revisit the call rather than inherit it.
+
+<details><summary>어떻게 측정했나 — the 4.51</summary>
+
+Arithmetic on the table above, same model and same export settings, frame 40:
+recovered = 6,636,905 − 4,340,511 = 2,296,394 points;
+recovered mean = (6,636,905 × 7.70 − 4,340,511 × 9.39) / 2,296,394 ≈ 4.51.
+The inputs are rounded to two decimals, so treat 4.51 as approximate. This is arithmetic on an
+existing sweep, not a new experiment, and no cloud was re-inspected for it. Support itself is
+computed in `orhsurf/_vendor/export_surface.py:163` against the model's own rendered depths
+(including the originating camera), after voxel dedup has already kept the highest-support
+representative of each voxel.
+
+</details>
 
 Speed, for the same models, `-r 4`: 2000 iterations trains in 105 s, 3000 in 187 s, and export is
 ~45 s either way (export scales with points, not with training length). So `fast` at 151 s is
-**4.6x** faster end-to-end than `quality` at 692 s — for a quarter of the points and support 7.50
-against 10.21.
+**4.6x faster than `quality` at 692 s on training + export** — for a quarter of the points and
+support 7.50 against 10.21. That 4.6x is *not* the end-to-end number: DA3 and COLMAP prep cost the
+same whichever preset runs, and including them gives `(692+148)/(151+148)` ≈ **2.8x**. The measured
+end-to-end figure is **307 s/frame**; size a job from that.
 
 **What the speedup actually is.** `economy` is **2.65x** faster than `quality` on the part it
 changes (training + export, 692 s -> 261 s). End to end it is less, because the DA3 prior and the
@@ -616,7 +703,10 @@ the Gaussians. Export falls 107 s → 36 s; training only 236 s → 187 s, becau
 training step scales with Gaussian count rather than with pixels.
 
 > `-r 3` **crashes** AmbiSuR around 40% of training (`utils/loss_utils.py:102`,
-> `get_img_grad_weight` on an empty tensor). Use even divisors.
+> `get_img_grad_weight` on an empty tensor). The rule is "use 1, 2, 4 or 8", and the reason is not
+> divisibility: `utils/camera_utils.py:21` treats **only** 1/2/4/8 as divisors and reads any other
+> positive value as a **target width in pixels**. So `-r 3` does not mean "a third" — it asks for a
+> 3-pixel-wide image, and the gradient weight is then computed on an empty tensor.
 
 ## Time and storage budget
 
