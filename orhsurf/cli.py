@@ -526,7 +526,7 @@ def build_parser() -> argparse.ArgumentParser:
     from .process import run as process_clips
     whole = sub.add_parser("process", help="download, prepare, reconstruct and verify whole clips sequentially")
     whole.add_argument("--clips", nargs="+", required=True, help="clip IDs in execution order, e.g. C001 C002")
-    whole.add_argument("--gpus", type=int, choices=(1,), default=1, help="one GPU, sequential frames and clips")
+    whole.add_argument("--gpus", type=int, default=1, help="GPUs on this node; parallel frames within each clip, sequential clips")
     whole.add_argument("--out-root", default=None, help="results under <root>/<clip>/<frame>; default out/")
     whole.add_argument("--cpus-per-job", type=int, default=None, help="thread limit within the existing allocation")
     whole.set_defaults(fn=process_clips)

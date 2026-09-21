@@ -39,6 +39,32 @@ cannot finish it. Use a permitted longer allocation or resume manually later. Do
 network unless inputs and weights are already present. Clip preparation happens one clip at a
 time, not by pre-downloading the entire list. No CPU/memory resource request is invented.
 
+### More GPUs on one node
+
+After obtaining an allocation with four GPUs visible to the same process:
+
+```bash
+orhsurf process --clips C001 C002 C003 C004 --gpus 4
+```
+
+Clips stay sequential; each clip's remaining frames are divided into contiguous ranges, with
+one worker per GPU. For C001 on two GPUs, an untouched clip divides into frames 0–112 and 113–224.
+This increases frame throughput; it does not split a single frame's model across GPUs.
+Completed matching frames can be resumed with a different GPU count.
+
+`--gpus` selects from GPUs already allocated on this node; it does not request more from Slurm
+or span multiple nodes. If fewer GPUs are visible, `process` stops before downloads. CPU threads
+default to allocated CPUs divided by the requested GPU count: 20 CPUs / 4 GPUs → 5 threads each.
+Explicit `--cpus-per-job` or `ORHSURF_CPUS_PER_JOB` overrides are **per worker**; their total must
+fit the allocation or the command stops. Each GPU still needs its own VRAM (40 GB+ recommended).
+Host RAM and concurrent scratch requirements grow with the number of workers; plan roughly
+6 GB scratch per worker based on historical measurements. Busy GPUs may be skipped by the
+runtime VRAM check. Speedup is not guaranteed to be linear because CPU and storage are shared.
+
+GPU mapping, frame partitioning, CPU budgets and allocation-error handling are covered by tests.
+Actual multi-GPU performance on this cluster has **not** been measured; the current live run
+continues on its existing single GPU.
+
 <details>
 <summary>Resume, Slurm batch setup and development details</summary>
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from . import cpubudget, fetch, paths
+from . import alloc, cpubudget, fetch, paths
 
 
 def full_frames(manifest: Path) -> str:
@@ -46,9 +46,19 @@ def run(a) -> int:
     # Validate the entire request before any downloads or work; no paths/globs as clip IDs.
     if len(set(a.clips)) != len(a.clips) or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', c) for c in a.clips):
         raise SystemExit('--clips requires unique clip IDs, e.g. C001 C002 C003')
-    budget = cpubudget.resolve(a.cpus_per_job)
-    if budget > cpubudget.allocation_cpus():
-        raise SystemExit('--cpus-per-job exceeds the current allocation')
+    if a.gpus < 1:
+        raise SystemExit('--gpus must be >= 1')
+    available = alloc.resolve_gpus(None)
+    if len(available) < a.gpus:
+        raise SystemExit(f'--gpus {a.gpus} requires {a.gpus} visible GPUs on this node; '
+                         f'only {len(available)} are allocated. Obtain the allocation first.')
+    gpus = available[:a.gpus]
+    budget = cpubudget.resolve(a.cpus_per_job, concurrent_jobs=len(gpus))
+    total = cpubudget.allocation_cpus()
+    if budget * len(gpus) > total:
+        raise SystemExit(f'{budget} CPU threads/job x {len(gpus)} GPUs exceeds {total} allocated CPUs. '
+                         'Lower --cpus-per-job (or ORHSURF_CPUS_PER_JOB).')
+    print(f'[process] {len(gpus)} GPUs, {budget} CPU threads per worker; clips remain sequential', flush=True)
     cpubudget.apply(budget)
     snapshot = paths.cache_dir() / 'hf/hub' / ('models--'+fetch.DA3_REPO.replace('/', '--')) / 'snapshots' / fetch.DA3_REVISION
     if not all((snapshot/name).is_file() for name in ('config.json','model.safetensors')):
@@ -68,7 +78,7 @@ def run(a) -> int:
         frames = full_frames(manifest)
         out = root/clip
         args = parser.parse_args(['run','--clip',str(manifest),'--frames',frames,
-                                  '--gpus','1','--cpus-per-job',str(budget),'--out',str(out),
+                                  '--gpus',str(len(gpus)),'--cpus-per-job',str(budget),'--out',str(out),
                                   '--shard','0','--shards','1'])
         rc = cli.cmd_run(args)
         if rc:
