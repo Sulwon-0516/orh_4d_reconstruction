@@ -1,4 +1,4 @@
-"""CPU-only normal-aware voxel representatives, with an exact point budget.
+"""CPU-only point subsampling; uniform random sampling by default.
 
 python -m orhsurf.simplify --source out/C001/00000 --out out/C001_simplified
 This is a derived product: it never modifies the source reconstruction.
@@ -156,23 +156,34 @@ def stratified_points(xyz, target, voxel_m=0.05, seed=0):
     return selected,info
 
 
-def main():
+def parse_targets(value):
+    targets = []
+    for token in value.split(','):
+        token = token.strip().upper()
+        targets.append(int(token[:-1]) * 1_000_000 if token.endswith('M') else int(token))
+    if not targets or min(targets) < 1 or len(set(targets)) != len(targets):
+        raise ValueError('targets must be unique positive counts, e.g. 10M,5M,1M')
+    return targets
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True, help='completed source frame directory')
     parser.add_argument('--out', type=Path, required=True, help='new derived-output root')
     parser.add_argument('--targets', default='10000000,5000000,1000000')
-    parser.add_argument('--method', choices=('normal-voxel', 'random', 'stratified'), default='normal-voxel')
+    parser.add_argument('--method', choices=('normal-voxel', 'random', 'stratified'), default='random')
     parser.add_argument('--voxel-mm', type=float, default=50, help='stratified spatial cell size; default 50 mm')
     parser.add_argument('--seed', type=int, default=0, help='random subsampling seed')
     parser.add_argument('--normal-angle', type=float, default=30)
     parser.add_argument('--search-steps', type=int, default=12)
     parser.add_argument('--cpus', type=int, default=2)
-    args = parser.parse_args()
+    parser.add_argument('--resume', action='store_true', help='reuse verified outputs with matching source and sampling settings')
+    args = parser.parse_args(argv)
     if not 1 <= args.cpus <= cpubudget.allocation_cpus():
         parser.error('--cpus must be within the current allocation')
     cpubudget.apply(args.cpus)
     import numpy as np
-    targets = [int(v) for v in args.targets.split(',')]
+    targets = parse_targets(args.targets)
     if len(set(targets)) != len(targets) or args.search_steps < 1:
         parser.error('targets must be unique; search steps must be positive')
     source = args.source.resolve()
@@ -194,8 +205,23 @@ def main():
         label = f'{target//1_000_000}M' if target % 1_000_000 == 0 else str(target)
         root = output/label
         dest = root/source.name
+        import hashlib
+        fingerprint = dict(derived_from=str(source), target=target, method=args.method,
+                           seed=args.seed, normal_angle=args.normal_angle,
+                           search_steps=args.search_steps, voxel_mm=args.voxel_mm,
+                           source_done_sha256=hashlib.sha256((source/'_DONE.json').read_bytes()).hexdigest(),
+                           source_mtime_ns=source_npz.stat().st_mtime_ns)
         if dest.exists() or dest == source:
-            raise FileExistsError(f'refusing to overwrite {dest}')
+            marker = dest/'_DONE.json'
+            if (args.resume and marker.is_file()
+                    and json.loads(marker.read_text()).get('fingerprint') == fingerprint):
+                report = atomicio.verify_frame(dest, deep=True)
+                if not report['ok']:
+                    raise RuntimeError(report)
+                summaries.append(json.loads((dest/'provenance.json').read_text()))
+                print(f'[simplify] reuse verified {dest}', flush=True)
+                continue
+            raise FileExistsError(f'refusing to overwrite incompatible or incomplete {dest}')
         start = time.monotonic()
         if args.method == 'stratified':
             indices, info = stratified_points(arrays['xyz'],target,args.voxel_mm/1000,args.seed)
@@ -214,7 +240,7 @@ def main():
                     source_n_points=n, n_points=target, search_seconds=time.monotonic()-start,
                     attributes='unmodified source representatives; no averaging or support union',
                     independent_lod=True)
-        with atomicio.FrameStage(dest, fingerprint=dict(derived_from=str(source), target=target, method=args.method, seed=args.seed)) as stage:
+        with atomicio.FrameStage(dest, fingerprint=fingerprint) as stage:
             atomicio.atomic_savez(stage.path/'surface.npz', **{k:a[indices] for k,a in arrays.items()})
             stage.record('surface.npz', n_points=target)
             atomicio.atomic_write_json(stage.path/'surface_export.json', info)
@@ -232,7 +258,7 @@ def main():
                     raise AssertionError(f'output attribute changed: {k}')
         info.update(output=str(dest), output_bytes=(dest/'surface.npz').stat().st_size,
                     total_seconds=time.monotonic()-start, verified=True)
-        atomicio.atomic_write_json(dest/'../simplify_report.json', info)
+        atomicio.atomic_write_json(dest/'simplify_report.json', info)
         summaries.append(info)
         print(json.dumps(info), flush=True)
     atomicio.atomic_write_json(output/f'{source.name}_summary.json', summaries)

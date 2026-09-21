@@ -370,3 +370,31 @@ respectively after the shared source load, including write/readback validation. 
 left 1,938 / 3,083 / 7,699 cells empty respectively; these are primarily low-population cells and
 are reported explicitly rather than promising minimum coverage. The maximum deviation from a
 cell's ideal fractional quota stayed below one point. Attributes remain exact source values.
+
+
+## Retention and duration validation
+
+The processing wrapper accepts `--simplify 10M,5M,1M` (random by default),
+`--simplify-only`, `--cleanup-decoded`, and `--durations 10,15`. The clip-array script forwards
+all of these options. Each duration is a separate run/output root; overlapping frames are
+currently reconstructed independently. No automatic GPU job submission was performed for these checks.
+
+On 2026-09-21, 30 focused tests passed, including exact saved arrays/dtypes, deterministic random
+selection, matching resume, deletion blocked by a bad derivative, interrupted deletion recovery,
+rejection of cleanup paths outside generated inputs, preservation of supplied masks, duration
+ranges/output isolation, and execution through the real batch script with a local `srun` substitute.
+That last test checks script-to-process argument forwarding, not Slurm scheduler admission.
+
+A separate CPU integration check reused the real completed C001 frame 0 (25,475,015 points).
+Its isolated source was hard-linked so deletion of the test link could not remove the production
+source. The run wrote and deeply verified all three budgets, removed test-original payloads and
+test RGB/automatic-mask links, resumed without calling GPU reconstruction, and verified 1/1
+expected retained frames across all three budgets. Total elapsed time was 58.99 seconds.
+10M / 5M / 1M NPZ sizes were 245,876,776 / 123,690,340 / 24,989,376 bytes;
+per-target sampling, writing and verification took 25.96 / 12.94 / 2.60 seconds, excluding source
+load. Original C001 payload size and modification time were unchanged.
+The local evidence is `reports/retention-real-201970.log`, with derived results under
+`out/retention_validation_201970/results/_simplified/C001/random/` (ignored runtime artifacts).
+GPU inference and doctor were bypassed in this integration check because the source reconstruction
+was already complete. Full 150-/225-frame retention and a real scheduled batch run have not yet
+been validated; do not describe these CPU and orchestration checks as full deployment validation.

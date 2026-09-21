@@ -65,6 +65,32 @@ class ProcessTests(unittest.TestCase):
             with patch('orhsurf.process.fetch.fetch_clip',side_effect=download), patch('orhsurf.process.fetch.convert_clip',side_effect=convert):
                 self.assertEqual(process.prepare('C001',root),root/'C001_first150_prepared/manifest.json')
 
+    def test_duration_versions_have_separate_roots_and_frame_limits(self):
+        args=cli.build_parser().parse_args(['process','--clips','C001','C002','--durations','10,15',
+            '--out-root','/tmp/durations-test','--simplify','5M','--simplify-only','--cleanup-decoded'])
+        original=process.run
+        with patch('orhsurf.process.run',return_value=0) as child:
+            self.assertEqual(original(args),0)
+        calls=[c.args[0] for c in child.call_args_list]
+        self.assertEqual([(a.clips,a._frame_limit,a.out_root) for a in calls],
+            [([c],d*15,f'/tmp/durations-test/{d}s') for c in ['C001','C002'] for d in [10,15]])
+        self.assertTrue(all(a.simplify_only and a.cleanup_decoded and a.simplify=='5M' for a in calls))
+
+    def test_15_second_preparation_decodes_225_not_150(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);raw=root/'_hevc/C001';raw.mkdir(parents=True)
+            raw_manifest=raw/'video_manifest.json'
+            raw_manifest.write_text(json.dumps(dict(window={'n_timestamps':225},conventions={'output_fps':15})))
+            def convert(src,dst,frames):
+                self.assertEqual(frames,'0-224');manifest(dst/'manifest.json',225);return 0
+            with patch('orhsurf.process.fetch.convert_clip',side_effect=convert):
+                p=process.prepare('C001',root,frame_limit=225,require_fps=15)
+            self.assertEqual(p,root/'C001_first225_prepared/manifest.json')
+            self.assertEqual(process.full_frames(p,frame_limit=225),'0-224')
+            raw_manifest.write_text(json.dumps(dict(window={'n_timestamps':225},conventions={'output_fps':30})))
+            with self.assertRaisesRegex(ValueError,'output_fps=15'):
+                process.prepare('C001',root,frame_limit=150,require_fps=15)
+
     def exercise(self, failure, gpus=1, cpus=1, total_cpus=20):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); events=[]

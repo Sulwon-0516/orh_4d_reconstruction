@@ -29,9 +29,10 @@ class ClipArrayTests(unittest.TestCase):
             self.assertNotIn('--shard',r.stdout)
 
     def test_smoke_and_gpu_options_forwarded(self):
-        r=self.call(['C001','C002'],options=['--smoke','--all-frames','--gpus','2'])
+        r=self.call(['C001','C002'],options=['--smoke','--all-frames','--gpus','2','--simplify','10M,5M,1M','--simplify-only','--cleanup-decoded','--durations','10,15'])
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertIn('--gpus\n2\n--smoke\n--all-frames',r.stdout)
+        self.assertIn('--simplify\n10M,5M,1M\n--simplify-only\n--cleanup-decoded\n--durations\n10,15',r.stdout)
 
     def test_invalid_or_duplicate_selection_stops(self):
         for clips,task in [(['C001','C001'],'0'),(['C001'],'2'),(['C001','C002'],None)]:

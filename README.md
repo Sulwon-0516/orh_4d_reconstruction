@@ -46,6 +46,16 @@ must be writable and shared across nodes. Submit from this checkout in each new 
 
 ### 3. Submit C001–C100
 
+For separate 10-second and 15-second versions, add `--durations 10,15` **after the script path**.
+Use `--durations 10` or `--durations 15` for just one version. At the dataset's verified 15 fps,
+these select frames 0–149 or 0–224 respectively (shorter clips stop at their last frame).
+Outputs are isolated under `<output-root>/10s/` and `<output-root>/15s/`.
+Prepared inputs use `*_first150_prepared` and `*_first225_prepared`; raw videos are shared.
+Both versions currently run independently, including reconstruction of overlapping frames;
+requesting both costs more compute and storage. Without `--durations`, the default remains
+150 frames under the original output-root layout.
+
+
 For **8 GPUs per clip**, with **at most 10 clips running concurrently**:
 
 ```bash
@@ -180,10 +190,58 @@ PLY contains only positions/normals/RGB and loses support/confidence.
 
 ### Smaller point clouds — point count per frame, not fewer frames
 
+**Storage-saving batch command** (after the shared installation and `SBATCH_SITE` setup above):
+
+```bash
+sbatch "${SBATCH_SITE[@]}" --array=0-99%10 --gres=gpu:8 slurm/process_clips.sbatch --gpus 8 --simplify 5M --simplify-only --cleanup-decoded C{001..100}
+```
+
+To save both durations with the same cleanup policy:
+
+```bash
+sbatch "${SBATCH_SITE[@]}" --array=0-99%10 --gres=gpu:8 slurm/process_clips.sbatch --gpus 8 --durations 10,15 --simplify 5M --simplify-only --cleanup-decoded C{001..100}
+```
+
+For example, the 15-second 5M output is
+`$MODEL_OUTPUT_DIR/15s/_simplified/C001/random/5M/00000/surface.npz`.
+Verify that version with `orhsurf verify --out "$MODEL_OUTPUT_DIR/15s/C001"`.
+
+This retains only **5M random-sampled points per frame** plus metadata. Choose `10M`, `5M`,
+`1M`, or a comma-separated list such as `10M,5M,1M`. The equivalent interactive command is:
+
+```bash
+orhsurf process --clips C001 C002 --gpus 1 --simplify 5M --simplify-only --cleanup-decoded
+```
+
+- `--simplify-only` requires `--simplify`. All requested derivatives must pass verification
+  before original NPZ/PLY payloads are removed. Original provenance and export metadata remain;
+  `_DONE.json` is renamed `_ORIGINAL_DONE.json` so it cannot masquerade as an available original.
+- `--cleanup-decoded` removes only generated RGB PNGs and automatic foreground-mask PNGs
+  named by the successfully processed manifest. Supplied masks, downloaded MP4/archive caches,
+  calibration and manifests are preserved. No shared-directory scan or cache purge is performed.
+- `_RETENTION.json` records the selection, recipe and cleanup state. Repeating the same command
+  verifies retained outputs and finishes interrupted cleanup without reconstructing deleted originals.
+  Changed settings require a new output root. `orhsurf verify --out <root>/C001` follows this record
+  and checks every expected frame and every retained point budget.
+- Cleanup occurs **after a complete clip**, not after each frame. Failed reconstruction or
+  simplification leaves originals and decoded inputs intact. Once intentionally cleaned, RGBs must
+  be explicitly re-decoded for new reconstruction or image-based inspection; manifests remain intact.
+
+At the measured random NPZ sizes, **100 clips × 150 frames** retain approximately **0.375 TB
+at 1M**, **1.86 TB at 5M**, or **3.71 TB at 10M**. Keeping all three is approximately **5.94 TB**.
+Saving both 10s and 15s versions multiplies these retained totals by 2.5: about **0.94 TB
+at 1M**, **4.65 TB at 5M**, or **14.85 TB for all three point budgets** across 100 clips.
+These are extrapolations, excluding videos/caches and temporary working data. While processing,
+each active 150-frame C001-sized clip still needs roughly **93 GB original clouds + 35 GB decoded
+inputs**, plus its derivatives and worker scratch. Ten concurrent clips multiply that temporary
+requirement; reduce array concurrency if necessary. This bounds accumulating decoded/original
+storage to active or failed clips, rather than keeping them for every successfully completed clip.
+
+
 10M / 5M / 1M means the **number of 3D points inside each frame**. It does not mean fewer
 timestamps. The default reconstruction processes all first 150 frames; simplification changes points per frame.
 
-Measured on C001 frame 0; all three derived files passed deep verification and an exact comparison
+The **normal-voxel** comparison below was measured on C001 frame 0; all three derived files passed deep verification and an exact comparison
 of saved attributes against the selected source points:
 
 | Version | Points per frame | NPZ size | Saved vs original | CPU processing time* |
@@ -200,7 +258,26 @@ On 50,000 sampled source points, the 95th-percentile distance to the nearest ret
 bounds. The shared-camera preview shows more normal variation at 1M; choose a point budget after
 checking the detail you need, rather than treating storage saving as proof of equivalent quality.
 
-The optional simplifier operates on a completed frame (it is not automatically enabled by `process`):
+Enable saved subsampled versions in the same processing command (default method: **random**,
+seed 0, sampling without replacement):
+
+```bash
+orhsurf process --clips C001 C002 --gpus 1 --simplify 10M,5M,1M
+# Or submit all clips; choose just --simplify 5M to save only the 5M version:
+sbatch "${SBATCH_SITE[@]}" --array=0-99%10 --gres=gpu:8 slurm/process_clips.sbatch --gpus 8 --simplify 10M,5M,1M C{001..100}
+```
+
+After each clip's reconstruction and verification, CPU postprocessing saves every selected frame
+under `<output-root>/_simplified/<clip>/random/{10M,5M,1M}/<frame>/surface.npz`.
+Each derived frame is verified, records provenance, and preserves float32 attributes. Matching
+completed derivatives are verified and reused on rerun; incompatible outputs are not overwritten.
+Original clouds remain in `<output-root>/<clip>/<frame>/` unless `--simplify-only` is supplied. Without `--simplify`, no derivatives
+are generated. A requested point count greater than the source count fails explicitly.
+Use `--simplify-method stratified` or `--simplify-method normal-voxel` for alternatives.
+This postprocessing does not reduce GPU reconstruction time. Keeping originals plus derivatives
+increases storage; choose a retention policy after inspecting quality.
+
+For a previously completed frame, use the standalone simplifier (also random by default):
 
 ```bash
 "$ORHSURF_PYTHON" -m orhsurf.simplify --source out/C001/00000 --out out/C001_simplified \
@@ -211,7 +288,7 @@ Outputs: `out/C001_simplified/{10M,5M,1M}/00000/surface.npz`, with completion ma
 provenance. The original is preserved. The same NPZ loader and viewer work on these files.
 Use a thread count within your allocation. Float attributes remain **float32**.
 
-The method groups by spatial voxel **and normal direction** (30° maximum within a normal bin),
+With `--method normal-voxel`, the method groups by spatial voxel **and normal direction** (30° maximum within a normal bin),
 retains the highest-support original point per group, then trims surplus representatives with
 a fixed random seed to hit the exact budget. Each target is computed from the original; versions
 are not nested. Voxel size and trim counts are recorded. This is a practical approximation,
@@ -219,7 +296,7 @@ not an optimal nearest-neighbour/mesh decimator or a guarantee against losing th
 No coordinates, colours or support values are averaged. Zero-length source normals use a separate
 unknown-direction bin. See [library alternatives](detail.md#point-cloud-simplification-alternatives).
 Keeping the original and all three versions adds storage; savings require choosing which derived
-version to retain later. Nothing deletes the original automatically.
+version to retain later. Only the explicit `--simplify-only` process option deletes original cloud payloads after verification.
 
 For density-preserving **spatial stratified sampling**, assign every 5 cm cell a point quota
 proportional to its original population, then randomly choose within each cell:

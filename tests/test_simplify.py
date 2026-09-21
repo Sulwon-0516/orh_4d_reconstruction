@@ -4,6 +4,35 @@ from orhsurf.simplify import normal_codes, grid_keys, representatives, select_po
 
 
 class SimplifyTests(unittest.TestCase):
+    def test_random_default_save_resume_and_reject_changed_settings(self):
+        import tempfile, json
+        from pathlib import Path
+        from orhsurf import atomicio
+        from orhsurf.simplify import main, parse_targets
+        self.assertEqual(parse_targets('10M,5M,1M'), [10000000,5000000,1000000])
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'original/00000'; out=Path(tmp)/'derived'
+            arrays={k:np.ones((30,width) if width else (30,),dtype=dtype)
+                    for k,(dtype,rank,width) in atomicio.SURFACE_ARRAYS.items()}
+            arrays['xyz']=np.arange(90,dtype=np.float32).reshape(30,3)
+            with atomicio.FrameStage(source) as stage:
+                atomicio.atomic_savez(stage.path/'surface.npz',**arrays)
+                atomicio.atomic_write_json(stage.path/'metadata.json',{})
+            original=(source/'surface.npz').read_bytes()
+            args=['--source',str(source),'--out',str(out),'--targets','10,5,1','--cpus','1','--resume']
+            main(args)
+            for count in (10,5,1):
+                dest=out/str(count)/'00000'
+                self.assertTrue(atomicio.verify_frame(dest)['ok'])
+                with np.load(dest/'surface.npz') as z:
+                    idx=np.random.default_rng(0).choice(30,count,replace=False);idx.sort()
+                    for key in arrays: np.testing.assert_array_equal(z[key],arrays[key][idx])
+            before=(out/'5/00000/surface.npz').stat().st_mtime_ns
+            main(args)
+            self.assertEqual(before,(out/'5/00000/surface.npz').stat().st_mtime_ns)
+            self.assertEqual(original,(source/'surface.npz').read_bytes())
+            with self.assertRaises(FileExistsError): main(args+['--seed','1'])
+
     def test_opposite_and_corner_normals_stay_separate(self):
         xyz = np.array([[0,0,0]]*4, np.float32)
         normal = np.array([[0,0,1],[0,0,-1],[1,0,0],[0,0,1]], np.float32)

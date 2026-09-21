@@ -164,6 +164,8 @@ def cmd_run(a) -> int:
     cpus_per_job = cpubudget.resolve(a.cpus_per_job, concurrent_jobs=len(gpus))
     cpubudget.apply(cpus_per_job)
     out_root = Path(a.out or (paths.out_root() / clip_id)).resolve()
+    if (out_root/'_RETENTION.json').exists():
+        raise SystemExit('output has a retention record; resume with the matching process command or use a new output root')
     # Scratch is namespaced by clip + a run id.  It used to be keyed only by logical GPU index and
     # frame, so two overlapping submissions built the same scene in the same directory and either
     # one's cleanup could delete the other's live workspace.
@@ -349,7 +351,11 @@ def cmd_verify(a) -> int:
         root = (paths.out_root() / clip_id).resolve()
     else:
         root = paths.out_root().resolve()
-    rep = atomicio.verify_tree(root, deep=not a.shallow)
+    from . import retention
+    if (root/retention.RECEIPT).is_file():
+        rep = retention.verify(root, json.loads((root/retention.RECEIPT).read_text()), deep=not a.shallow)
+    else:
+        rep = atomicio.verify_tree(root, deep=not a.shallow)
     print(f"[verify] {root}")
     exp = f" (expected {rep['expected']})" if rep.get("expected") is not None else \
           "  [no _EXPECTED.json: only frames already on disk were checked]"
@@ -537,6 +543,11 @@ def build_parser() -> argparse.ArgumentParser:
     whole.add_argument("--cpus-per-job", type=int, default=None, help="thread limit within the existing allocation")
     whole.add_argument("--smoke", action="store_true", help="frame 0 only at full quality; isolated inputs and out/_smoke/<clip>")
     whole.add_argument("--all-frames", action="store_true", help="process every encoded frame instead of the default first 150; --smoke takes precedence")
+    whole.add_argument("--simplify", default=None, help="save derived point budgets after clip verification, e.g. 10M,5M,1M")
+    whole.add_argument("--simplify-method", choices=("random", "normal-voxel", "stratified"), default="random")
+    whole.add_argument("--simplify-only", action="store_true", help="requires --simplify; remove original clouds after all derivatives verify")
+    whole.add_argument("--cleanup-decoded", action="store_true", help="after successful clip verification, remove generated RGB and automatic masks; preserve videos and manifests")
+    whole.add_argument("--durations", default=None, help="separate 10 and/or 15 second versions at 15 fps, e.g. 10,15; outputs <root>/10s and <root>/15s")
     whole.set_defaults(fn=process_clips)
 
     r = sub.add_parser("run", help="reconstruct a clip end to end (prep -> DA3 -> train -> export)")
