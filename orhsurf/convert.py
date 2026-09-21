@@ -30,12 +30,25 @@ from pathlib import Path
 EXPECT_W, EXPECT_H = 2048, 1536
 
 
-def _ffprobe_frames(mp4: Path) -> int:
+def _ffprobe_frames(mp4: Path, exact: bool = False) -> int:
+    """Frame count. `exact=False` reads the container header; `exact=True` decodes to count.
+
+    -count_frames DECODES THE WHOLE FILE.  Calling it per view to validate a 5-frame decode cost
+    ~50 s per view here -- 225 frames decoded to justify keeping 5.  The header's nb_frames is
+    free and is what we check per view; the expensive exact count is done once, on the first
+    video only, to confirm the header is not lying about this encoder.
+    """
+    if exact:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+             "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(mp4)],
+            capture_output=True, text=True, check=True).stdout.strip()
+        return int(out)
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
-         "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(mp4)],
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_frames", "-of", "csv=p=0", str(mp4)],
         capture_output=True, text=True, check=True).stdout.strip()
-    return int(out)
+    return int(out) if out.isdigit() else -1
 
 
 def parse_frames(spec: str | None, n_total: int) -> list[int]:
@@ -85,10 +98,11 @@ def decode_views(clip_dir: Path, out_dir: Path, serials, n_expect: int, frames=N
     for i, s in enumerate(todo, 1):
         mp4 = clip_dir / "videos" / f"{s}.mp4"
         assert mp4.exists(), f"missing video for {s}: {mp4}"
-        got = _ffprobe_frames(mp4)
+        got = _ffprobe_frames(mp4, exact=(i == 1))     # exact decode-count on the first view only
         assert got == n_expect, (
             f"{s}: video holds {got} frames, manifest says {n_expect}. Refusing to decode -- a "
-            f"frame-count mismatch means the index mapping is not what this code assumes.")
+            f"frame-count mismatch means the index mapping is not what this code assumes."
+            + ("" if got >= 0 else " (container header carries no nb_frames; rerun with exact=True)"))
         d = out_dir / "rgb" / s
         tmp = d.with_name(d.name + ".part")
         shutil.rmtree(tmp, ignore_errors=True)
