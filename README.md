@@ -227,10 +227,28 @@ orhsurf process --clips C001 C002 --gpus 1 --simplify 5M --simplify-only --clean
   simplification leaves originals and decoded inputs intact. Once intentionally cleaned, RGBs must
   be explicitly re-decoded for new reconstruction or image-based inspection; manifests remain intact.
 
+**Estimated retained cloud storage per clip** using the real C001 frame-0 random-sampling
+measurements (decimal GB; original cloud payloads removed with `--simplify-only`):
+
+| Retained version | 10 seconds / 150 frames | 15 seconds / 225 frames | Reduction vs original clouds |
+|---|---:|---:|---:|
+| Original | 92.67 GB | 139.01 GB | — |
+| 10M | 36.88 GB | 55.32 GB | 60.2% |
+| 5M | 18.55 GB | 27.83 GB | 80.0% |
+| 1M | 3.75 GB | 5.62 GB | 96.0% |
+| All three budgets | 59.18 GB | 88.78 GB | 36.1% |
+
+For example, retaining only 5M saves about **74.12 GB per 10-second clip**, or **111.18 GB
+per 15-second clip**, in cloud payloads. `--cleanup-decoded` additionally releases approximately
+**35 GB / 53 GB** of generated inputs respectively, using the earlier decoded-input estimate.
+These are extrapolations from one frame, not measured completed-clip totals. Metadata, retained
+MP4/archive caches and working scratch are excluded. Retaining both durations adds their two
+columns; the current independent-version workflow does not deduplicate overlapping frames.
+
 At the measured random NPZ sizes, **100 clips × 150 frames** retain approximately **0.375 TB
-at 1M**, **1.86 TB at 5M**, or **3.71 TB at 10M**. Keeping all three is approximately **5.94 TB**.
+at 1M**, **1.86 TB at 5M**, or **3.69 TB at 10M**. Keeping all three is approximately **5.92 TB**.
 Saving both 10s and 15s versions multiplies these retained totals by 2.5: about **0.94 TB
-at 1M**, **4.65 TB at 5M**, or **14.85 TB for all three point budgets** across 100 clips.
+at 1M**, **4.64 TB at 5M**, or **14.80 TB for all three point budgets** across 100 clips.
 These are extrapolations, excluding videos/caches and temporary working data. While processing,
 each active 150-frame C001-sized clip still needs roughly **93 GB original clouds + 35 GB decoded
 inputs**, plus its derivatives and worker scratch. Ten concurrent clips multiply that temporary
