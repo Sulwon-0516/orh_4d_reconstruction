@@ -481,7 +481,9 @@ orhsurf process --clips C001 --preset balanced --gpus 8
 | `balanced` | 3000 | 500/100 | 728,730 | 9.38 | 343 s |
 | `economy` | 2000 | 500/**80** | 676,926 | 9.07 | **261 s** |
 | `draft` | 1000 | 500/100 | 148,377 | 7.90 | 198 s |
-| **`fast`** (default) | 2000 @ **`-r 4`** | 500/80 | 615,437 | 7.50 | **151 s** |
+| **`fast`** (default) | 2000 @ **`-r 4`** | 500/80 | 615,437 | 7.50 | **151 s**\* |
+
+\* Training + export only. **End to end, with DA3, `fast` measures 307 s/frame** — see below.
 
 `fast` is the only preset that changes the **raster**, and it is the only one whose isolation
 threshold moves with it: it sets `--resolution 4` **and** `--nn-max-mm 10`. Do not set one without
@@ -493,6 +495,36 @@ before being written down. They have **not** been re-checked across frames or cl
 
 An explicit flag overrides the preset, so `--preset economy --iterations 2500` is legal;
 `--densify-from-iter` and `--densification-interval` are exposed for the same reason.
+
+### What `fast` actually costs per frame, end to end
+
+The preset table's times are **training + export only**, measured by reusing an already-built
+scene, so they exclude the DA3 prior and the COLMAP preparation. Those cost the same whichever
+preset you pick, and they dominate once you stop reusing a scene.
+
+Five consecutive frames (40–44) through `orhsurf run --preset fast`, one GPU, sequential:
+
+```
+verify: 5/5 frames ok (expected 5), 32,550,219 points
+wall:   1533 s  ->  307 s/frame, DA3 included
+peak:   23,961 MiB of a 24,564 MiB card (97.5%)
+```
+
+| frame | points | support | gaussians |
+|---|---|---|---|
+| 00040 | 6,517,462 | 7.44 | 619,521 |
+| 00041 | 6,516,671 | 7.38 | 622,720 |
+| 00042 | 6,507,767 | 7.37 | 625,242 |
+| 00043 | 6,502,430 | 7.46 | 628,527 |
+| 00044 | 6,505,889 | 7.48 | 616,665 |
+
+Point count varies by **0.23%** across the five, half the run-to-run noise floor, so the preset is
+stable frame to frame — every earlier number in this section came from frame 40 alone.
+
+**Size a job from 307 s/frame, not from 151 s.** And note the peak: even at group size 17 the DA3
+stage leaves about **600 MB** of a 24 GB card unused, so a card sharing work with anything else
+will still fail. `run` checks free VRAM and simply skips such GPUs, which is why asking for
+`--gpus 5` on a busy box may dispatch onto two.
 
 ### DA3 view grouping, and why the default is 17 rather than 18
 
