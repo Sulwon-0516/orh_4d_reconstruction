@@ -84,7 +84,15 @@ def frame_mask_path(cam, frame_index):
     """
     fr = cam.get("frames")
     if fr:
-        ent = fr[str(frame_index)] if isinstance(fr, dict) else fr[frame_index]
+        if isinstance(fr, dict):
+            k = str(frame_index) if str(frame_index) in fr else frame_index
+            assert k in fr, (f"frame {frame_index} is not in this manifest; it carries "
+                             f"{len(fr)} frame(s). A converted clip only holds what was decoded.")
+            ent = fr[k]
+        else:
+            assert 0 <= frame_index < len(fr), (
+                f"frame {frame_index} out of range; this manifest carries {len(fr)} frames")
+            ent = fr[frame_index]
         if isinstance(ent, dict) and ent.get("mask_path"):
             return ent["mask_path"]
     cm = cam.get("mask_path")

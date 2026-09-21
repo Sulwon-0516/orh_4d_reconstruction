@@ -102,6 +102,28 @@ def cmd_run(a) -> int:
     clip_id = a.clip if not Path(a.clip).exists() else manifest.parent.name
     frames = parse_frames(a.frames)
 
+    # A converted clip carries only the frames that were decoded (orhsurf.convert writes the set to
+    # `decoded_frames`).  --frames defaults to 0-149, so a clip converted with `--frames 0-4` used to
+    # fail INSIDE a worker -- after resolving GPUs, building the scene and paying for prep.  Check it
+    # here, where the argument was typed.
+    try:
+        _man = json.load(open(manifest))
+    except Exception:
+        _man = None
+    if _man is not None and _man.get("decoded_frames") is not None:
+        have = set(_man["decoded_frames"])
+        missing = [f for f in frames if f not in have]
+        if missing:
+            avail = sorted(have)
+            span = (f"{avail[0]}-{avail[-1]}" if avail and avail == list(range(avail[0], avail[-1] + 1))
+                    else (str(avail[:12])[:-1] + ", ...]" if len(avail) > 12 else str(avail)))
+            raise SystemExit(
+                f"--frames asks for {len(missing)} frame(s) this clip does not carry "
+                f"(first missing: {missing[0]}).\n"
+                f"  {manifest} was converted with only these frames decoded: {span}\n"
+                f"  Either pass --frames within that set, or re-run "
+                f"`orhsurf fetch --clip <id> --convert --frames <range>` to decode more.")
+
     # Job-array sharding: take this task's contiguous slice BEFORE anything else, so each task
     # only ever considers, resumes and renders its own frames.
     shard = a.shard if a.shard is not None else _int_env("SLURM_ARRAY_TASK_ID")
