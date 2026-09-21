@@ -38,8 +38,23 @@ def cam_arrays(cam: dict):
 
 
 def frame_of(cam: dict, i: int) -> dict:
-    frames = cam["frames"]
-    f = frames[str(i)] if isinstance(frames, dict) else frames[i]
+    """`frames` may be a list (one entry per frame, position == index) or a dict keyed by the
+    frame index as a STRING.  orhsurf.convert emits the dict form on purpose: a converted subset
+    then keeps true clip indices, so `run --frames 40-41` means clip frames 40 and 41 rather than
+    "the 40th thing that happened to be decoded".  The vendored loader
+    (colmap_dataset.frame_image_path) already accepted both; this did not, and a converted clip
+    died here with `KeyError: 0`.  The `index` assertion below is what actually guarantees we got
+    the frame we asked for, under either form."""
+    fr = cam["frames"]
+    if isinstance(fr, dict):
+        key = str(i)
+        assert key in fr, (f"frame {i} is not in this manifest. Frames present: "
+                           f"{sorted(int(k) for k in fr)[:8]}... "
+                           f"(a converted clip only carries the frames that were decoded)")
+        f = fr[key]
+    else:
+        assert 0 <= i < len(fr), (f"frame {i} out of range; this manifest carries {len(fr)} frames")
+        f = fr[i]
     assert f["index"] == i, f"frame index mismatch: entry says {f['index']}, asked for {i}"
     return f
 
