@@ -170,7 +170,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True, help='completed source frame directory')
     parser.add_argument('--out', type=Path, required=True, help='new derived-output root')
-    parser.add_argument('--targets', default='10000000,5000000,1000000')
+    parser.add_argument('--targets', default='1M,5M')
     parser.add_argument('--method', choices=('normal-voxel', 'random', 'stratified'), default='random')
     parser.add_argument('--voxel-mm', type=float, default=50, help='stratified spatial cell size; default 50 mm')
     parser.add_argument('--seed', type=int, default=0, help='random subsampling seed')

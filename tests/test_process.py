@@ -91,7 +91,7 @@ class ProcessTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'output_fps=15'):
                 process.prepare('C001',root,frame_limit=150,require_fps=15)
 
-    def exercise(self, failure, gpus=1, cpus=1, total_cpus=20):
+    def exercise(self, failure, gpus=1, cpus=1, total_cpus=20, **options):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); events=[]
             def prep(clip,data,**kwargs):
@@ -103,10 +103,33 @@ class ProcessTests(unittest.TestCase):
                 return 7 if failure=='run' else 0
             def verify(a):
                 events.append(('verify',Path(a.out).name)); return 8 if failure=='verify' else 0
-            args=argparse.Namespace(clips=['C001','C002'],gpus=gpus,cpus_per_job=cpus,out_root=str(root/'out'))
+            args=argparse.Namespace(clips=['C001','C002'],gpus=gpus,cpus_per_job=cpus,out_root=str(root/'out'),**options)
             with patch.dict(os.environ, {k:v for k,v in os.environ.items() if k != 'ORHSURF_CPUS_PER_JOB'}, clear=True), patch('orhsurf.alloc.visible_gpus',return_value=list(range(gpus))), patch('orhsurf.cpubudget.allocation_cpus',return_value=total_cpus), patch('orhsurf.process.fetch.fetch_weights',return_value=0), patch('orhsurf.cli.cmd_doctor',return_value=0), patch('orhsurf.process.prepare',side_effect=prep), patch('orhsurf.cli.cmd_run',side_effect=run), patch('orhsurf.cli.cmd_verify',side_effect=verify):
                 rc=process.run(args)
             return rc,events
+
+    def test_simplify_preserves_originals_and_only_defaults_to_1m_5m(self):
+        for only in (False, True):
+            options={'simplify_only':True} if only else {'simplify':'1M,5M'}
+            with patch('orhsurf.simplify.main') as simplify, patch('orhsurf.retention.finish') as finish:
+                rc,_=self.exercise(None,**options)
+                self.assertEqual(rc,0)
+                self.assertEqual(simplify.call_count,300)
+                cmd=simplify.call_args.args[0]
+                self.assertEqual(cmd[cmd.index('--targets')+1],'1M,5M')
+                if only:
+                    self.assertEqual(finish.call_count,2)
+                    spec=finish.call_args.args[1]
+                    self.assertTrue(spec['simplify_only'])
+                    self.assertEqual(spec['targets'],[1000000,5000000])
+                else:
+                    finish.assert_not_called()
+
+    def test_empty_simplify_budget_cannot_delete_originals(self):
+        args=cli.build_parser().parse_args(['process','--clips','C001','--simplify','','--simplify-only'])
+        with patch('orhsurf.alloc.resolve_gpus') as gpu:
+            with self.assertRaises(ValueError): process.run(args)
+            gpu.assert_not_called()
 
     def test_clips_sequential(self):
         rc,events=self.exercise(None)

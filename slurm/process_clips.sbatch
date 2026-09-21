@@ -15,7 +15,14 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke) SMOKE+=(--smoke); shift ;;
         --all-frames|--simplify-only|--cleanup-decoded) SMOKE+=("$1"); shift ;;
-        --simplify|--simplify-method|--durations) SMOKE+=("$1" "${2:?option needs a value}"); shift 2 ;;
+        --simplify)
+            SMOKE+=(--simplify)
+            if [[ ${2:-} =~ ^[0-9]+[mM]?(,[0-9]+[mM]?)*$ ]]; then
+                SMOKE+=("$2"); shift 2
+            else
+                SMOKE+=(1M,5M); shift
+            fi ;;
+        --simplify-method|--durations) SMOKE+=("$1" "${2:?option needs a value}"); shift 2 ;;
         --gpus) GPUS="${2:?--gpus needs a count}"; shift 2 ;;
         --) shift; break ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;

@@ -34,6 +34,19 @@ class ClipArrayTests(unittest.TestCase):
         self.assertIn('--gpus\n2\n--smoke\n--all-frames',r.stdout)
         self.assertIn('--simplify\n10M,5M,1M\n--simplify-only\n--cleanup-decoded\n--durations\n10,15',r.stdout)
 
+    def test_bare_simplify_defaults_without_consuming_clip_or_next_option(self):
+        for options in (['--simplify'], ['--simplify','--cleanup-decoded']):
+            r=self.call(['C001'],task='0',options=options)
+            self.assertEqual(r.returncode,0,r.stderr)
+            self.assertIn('--clips\nC001\n',r.stdout)
+            self.assertIn('--simplify\n1M,5M\n',r.stdout)
+
+    def test_simplify_only_works_without_budget_argument(self):
+        r=self.call(['C001'],task='0',options=['--simplify-only'])
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertIn('--simplify-only',r.stdout)
+        self.assertIn('--clips\nC001\n',r.stdout)
+
     def test_invalid_or_duplicate_selection_stops(self):
         for clips,task in [(['C001','C001'],'0'),(['C001'],'2'),(['C001','C002'],None)]:
             self.assertNotEqual(self.call(clips,task).returncode,0)

@@ -21,6 +21,8 @@ def derived_root(out, method, target):
 
 def verify(out, receipt, deep=True):
     spec = receipt['identity']
+    if spec['simplify_only'] and not spec['targets']:
+        raise ValueError('cannot retain only simplified outputs without a target budget')
     reports = []
     for frame in spec['frames']:
         roots = ([] if spec['simplify_only'] else [out]) + [

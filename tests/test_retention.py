@@ -27,6 +27,17 @@ class RetentionTests(unittest.TestCase):
         spec=retention.identity(manifest,'recipe',[0],[5,1],'random',True,True)
         return out,manifest,rgb,mask,spec
 
+    def test_bare_simplify_cli_defaults_to_two_random_budgets(self):
+        from orhsurf import cli
+        args=cli.build_parser().parse_args(['process','--clips','C001','--simplify'])
+        self.assertEqual(args.simplify,'1M,5M')
+        self.assertEqual(args.simplify_method,'random')
+        self.assertFalse(args.simplify_only)
+        only=cli.build_parser().parse_args(['process','--clips','C001','--simplify-only'])
+        self.assertTrue(only.simplify_only)
+        self.assertIsNone(only.simplify)
+        self.assertIsNone(cli.build_parser().parse_args(['process','--clips','C001']).simplify)
+
     def test_keep_only_verified_derivatives_cleanup_and_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             out,manifest,rgb,mask,spec=self.setup_clip(Path(tmp))

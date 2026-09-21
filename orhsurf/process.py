@@ -95,10 +95,10 @@ def run(a) -> int:
     frame_limit = getattr(a, '_frame_limit', 150)
     simplify_targets = getattr(a, 'simplify', None)
     only = getattr(a, 'simplify_only', False)
+    if only and simplify_targets is None:
+        simplify_targets = '1M,5M'
     cleanup = getattr(a, 'cleanup_decoded', False)
-    if only and not simplify_targets:
-        raise SystemExit('--simplify-only requires --simplify, e.g. --simplify 5M')
-    if simplify_targets:
+    if simplify_targets is not None:
         from .simplify import parse_targets
         parse_targets(simplify_targets)  # reject invalid selections before downloads
     # Validate the entire request before any downloads or work; no paths/globs as clip IDs.
