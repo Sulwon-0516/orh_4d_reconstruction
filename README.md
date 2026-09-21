@@ -80,13 +80,17 @@ Conversion decodes on CPU, with thread counts limited by the current allocation.
 conversion may run inside an existing GPU compute allocation; no separate Slurm submission is
 inherently required. Follow your site's rules and do not run heavy work on a login node.
 
-**The published clip has no masks.** Without masks, conversion writes the images and manifest but
-returns **exit code 3**, explicitly reporting missing inputs. This is not reconstruction success.
-Do not substitute empty or all-white masks. Provide validated RGBA foreground masks at
-`<mask-dir>/<camera-serial>/<encoded-frame-index:05d>.png`. Then:
+**Default mask policy: all foreground.** When `--masks` is omitted, conversion creates RGBA
+PNGs with alpha=255 everywhere and records `mask_policy.mode=all_foreground` in the prepared
+manifest. The published clips therefore do not need separate masks to use the default workflow.
+To use subject masks instead, pass `--masks /absolute/path/to/masks`, laid out as
+`<mask-dir>/<camera-serial>/<encoded-frame-index:05d>.png`. Missing files in an explicitly supplied
+mask directory remain an error (exit code 3); they are not silently replaced.
+
+All-foreground masks change the visual-hull centre and can change DA3 camera grouping. Training
+still uses full RGB; equivalence to subject-mask reconstructions has not been established.
 
 ```bash
-orhsurf fetch --clip C001 --convert --frames 0-4 --masks /absolute/path/to/validated/masks
 orhsurf fetch --weights
 orhsurf doctor
 orhsurf run --clip data/C001_prepared/manifest.json --gpus 1 --frames 0-0
@@ -99,7 +103,7 @@ orhsurf verify --clip data/C001_prepared/manifest.json
 `--clip` accepts a clip id under `ORHSURF_DATA_ROOT`, a directory, or a manifest path.
 Relative image/mask paths are resolved against the manifest directory, without rewriting the
 original JSON. Converted frame subsets retain their true encoded indices, including nonzero or
-noncontiguous selections. The converter does not generate masks; see [the input contract](docs/DATA_CONTRACT.md).
+noncontiguous selections. The converter generates all-foreground masks by default; see [the input contract](docs/DATA_CONTRACT.md).
 
 For an already-extracted HEVC archive, `orhsurf.fetch.convert_clip(clip_dir, out_dir, masks=..., frames="0-4")`
 can be called directly without downloading or extracting again.
@@ -356,8 +360,8 @@ See **[docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md)** for the `manifest.json` s
 conventions and output format.
 
 > **Note:** the published HuggingFace dataset does not yet match this contract — most importantly
-> it does not ship foreground masks, which this pipeline requires. The mismatch is documented in
-> full at the top of DATA_CONTRACT.md and needs a decision before a stranger can run this.
+> it does not ship foreground masks. `fetch --convert` supplies all-foreground RGBA masks by
+> default; use `--masks` for subject masks. See DATA_CONTRACT.md for the grouping implications.
 >
 > **Masks do not make the output foreground-only.** Training uses the unmasked RGB and export
 > validity uses opacity/depth; masks affect only the camera ordering for the DA3 prior. The
@@ -414,16 +418,13 @@ refinements rather than blockers. What is and is not proven:
       `doctor --phase noweights`, CUDA matmul/backward, simple-knn, rasterizer visibility, and
       xformers attention/backward pass. This does not substitute for full model inference.
       DA3 retains its documented numpy<2 metadata conflict with the pinned numpy 2.2.6.
-- [x] C001 JPEG fetch and HEVC conversion are exercised on a compute node. Missing masks remain an explicit blocker; this does not establish end-to-end reconstruction.
+- [x] C001 JPEG fetch and HEVC conversion are exercised on a compute node. All-foreground masks are the default; this does not establish end-to-end reconstruction.
 - [ ] Full 150-frame clip, and 8-GPU scaling (only 2 GPUs were exercised).
 - [ ] The debug video renders (`--render-orbit/--render-time/--render-both`). The always-on static
       check render is exercised; the video paths are not.
 
-**Blocked on a decision**
-- [ ] **The published dataset ships no foreground masks**, which this pipeline requires in two
-      places (AmbiSuR's per-view alpha, and the visual hull that orders cameras for DA3). Either
-      masks get published alongside the clips, or a mask-generation stage has to be added. See
-      `docs/DATA_CONTRACT.md`.
-- [ ] Our own `manifest.json` carries `mask_path: None`; the masks live in a second file,
-      `manifest_fg.json`. A published manifest needs them in one place.
+**Mask policy and input paths**
+- [x] All-foreground RGBA masks are the default when `--masks` is omitted. The previous prohibition
+      on using all-white masks has been withdrawn. Supplied masks remain an explicit override.
+- [x] Prepared manifests record per-frame mask paths and the selected mask policy.
 - [x] Relative manifest paths resolve against the manifest directory. Obsolete absolute paths still require explicit remapping.

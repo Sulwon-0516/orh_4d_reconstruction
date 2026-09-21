@@ -18,10 +18,9 @@ The archives ship no foreground masks, and three places want them:
   prep.py:72          asserts a mask_path per view, and >= 8 non-empty ones
   build_scene         writes the mask into each image's alpha channel
   visual_hull_box     derives the per-frame scene centre that orders views into DA3 groups
-Nothing in TRAINING uses them (train.py never calls get_gtImage; the loss uses unmasked RGB), so
-they do not make the output foreground-only.  This converter therefore does NOT invent masks.  It
-writes the frames and the manifest, and reports exactly what is still missing, so the gap is one
-named step rather than an opaque failure.
+Training uses unmasked RGB. Conversion uses all-foreground RGBA masks by default, with
+--masks as an explicit override. This changes the visual-hull centre used for DA3 grouping;
+it is not a claim of equivalent output to subject-mask reconstruction.
 """
 from __future__ import annotations
 import json, shutil, subprocess
@@ -148,23 +147,15 @@ def _solid_rgba_png(w: int, h: int, v: int = 255) -> bytes:
             + chunk(b"IEND", b""))
 
 
-def write_all_foreground_masks(clip_dir: Path, rgb_root: Path, out_dir: Path, log=print) -> Path:
+def write_all_foreground_masks(clip_dir: Path, rgb_root: Path, out_dir: Path, log=print, frames=None) -> Path:
     """Write an all-foreground (alpha = 255 everywhere) RGBA mask beside every decoded frame.
 
-    WHY THIS IS NOT A CHEAT, and exactly what it costs:
-      * AmbiSuR never reads the alpha -- train.py does not call get_gtImage, and its image loss uses
-        the unmasked RGB. Export validity is rendered opacity and depth. So the mask cannot change
-        the reconstruction's content.
-      * prep.py asserts a usable mask per view and >= 8 non-empty ones; build_scene writes the mask
-        into each image's alpha. All-ones satisfies both without altering anything downstream.
-      * The one real consequence: visual_hull_box() derives the DA3 azimuth centre from the masks.
-        With real masks that centre is the SUBJECT (measured: 2.6% mean foreground, moving up to
-        2.83 m across a clip); with all-ones it becomes the camera-frustum intersection instead, so
-        the 47 views are grouped differently. Whether that changes the output is UNMEASURED.
-    Supply real masks with --masks to keep the subject-centred grouping.
+    Training uses full RGB, while the visual-hull centre affects DA3 camera grouping.
+    This is the default policy, not a segmentation result or a claim of equivalent output.
+    Supply subject masks with --masks to use subject-centred grouping.
     """
     import json
-    vm = json.load(open(Path(clip_dir) / "video_manifest.json"))
+    vm = json.loads((Path(clip_dir) / "video_manifest.json").read_text())
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     cache, n = {}, 0
     for s in vm["valid_serials"]:
@@ -175,7 +166,10 @@ def write_all_foreground_masks(clip_dir: Path, rgb_root: Path, out_dir: Path, lo
         if wh not in cache:
             cache[wh] = _solid_rgba_png(*wh)
         (out_dir / s).mkdir(parents=True, exist_ok=True)
-        for f in sorted(d.glob("*.png")):
+        files = sorted(d.glob("*.png")) if frames is None else [d / f"{i:05d}.png" for i in frames]
+        for f in files:
+            if not f.is_file():
+                raise FileNotFoundError(f"missing decoded RGB: {f}")
             (out_dir / s / f.name).write_bytes(cache[wh]); n += 1
     log(f"[convert] wrote {n} all-foreground masks -> {out_dir}")
     log(f"[convert]   AmbiSuR ignores the alpha; these exist because prep asserts a mask per view.")
@@ -184,7 +178,7 @@ def write_all_foreground_masks(clip_dir: Path, rgb_root: Path, out_dir: Path, lo
 
 
 def build_manifest(clip_dir: Path, rgb_root: Path, mask_root: Path | None, out_json: Path,
-                   frames=None, log=print):
+                   frames=None, log=print, mask_mode=None):
     """video_manifest.json -> this pipeline's manifest schema, with resolved local paths."""
     clip_dir, rgb_root = Path(clip_dir).resolve(), Path(rgb_root).resolve()
     mask_root = Path(mask_root).resolve() if mask_root is not None else None
@@ -234,6 +228,8 @@ def build_manifest(clip_dir: Path, rgb_root: Path, mask_root: Path | None, out_j
                frame_index_basis="encoded_frame_index (0-based MP4 decode order)",
                decoded_frames=(list(range(n)) if frames is None else list(frames)),
                cameras=cams)
+    if mask_mode is not None:
+        man["mask_policy"] = dict(mode=mask_mode, root=str(mask_root))
     Path(out_json).parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(out_json) + ".tmp")
     tmp.write_text(json.dumps(man, indent=1))

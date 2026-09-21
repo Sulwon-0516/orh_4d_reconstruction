@@ -1,11 +1,10 @@
 # Input data contract
 
-## ⚠️ The published dataset does not match this contract yet
+## Published data and conversion defaults
 
 The HuggingFace dataset `Sulwon/anonymous_dataset_lih_orh_0920`
-(revision `535c72f84dc124cfed76fb1be2c17e136fb331c3`) was inspected on 2026-09-20. **Its layout and
-the layout this pipeline was developed against disagree in three ways that block a stranger from
-running it.** Stated plainly rather than papered over:
+(revision `535c72f84dc124cfed76fb1be2c17e136fb331c3`) was inspected on 2026-09-20. Its raw layout differs from the pipeline input. `fetch --convert` decodes HEVC frames and supplies
+all-foreground RGBA masks by default; `--masks` selects user-supplied masks instead.
 
 | | Published on HuggingFace | What this pipeline needs |
 |---|---|---|
@@ -30,10 +29,12 @@ Three concrete consequences:
 > scene**, not the subject. Making it foreground-only would be a new feature with its own A/B
 > check, not a configuration change.
 
-1. **Masks are the blocker.** Nothing in the published tree corresponds to our
-   `masks_all/<serial>/<frame>.png`. Without them `orhsurf run` stops in `prep` with an explicit
-   error. Either the masks must be published alongside the clips, or a mask-generation step must be
-   added to the package. **This needs a decision — the package cannot invent it.**
+1. **All foreground is the default mask policy.** The archives do not include subject masks.
+   Conversion creates RGBA masks with alpha=255 everywhere when `--masks` is omitted. The previous
+   prohibition on all-white replacement masks no longer applies. This changes the visual-hull
+   centre used for DA3 grouping; equivalence to subject-mask results is not established.
+   `mask_policy` in the prepared manifest records `all_foreground` or `provided`, plus the mask root.
+   An explicitly supplied but incomplete mask directory fails rather than mixing the two policies.
 2. **Our own `manifest.json` carries `mask_path: None`.** On the development machine the masks are
    in a *second* manifest, `manifest_fg.json`. Any published manifest must carry `mask_path` per
    frame, or pass the validated RGBA mask directory via `fetch --convert --masks`.

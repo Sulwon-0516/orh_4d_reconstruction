@@ -156,7 +156,9 @@ orhsurf fetch --clip C001              # downloads + extracts the clip archive
 ```
 
 > `fetch --clip` gets you the raw capture, **not a runnable clip**: the published archive has no
-> `manifest.json` in this pipeline's schema and no foreground masks. See `docs/DATA_CONTRACT.md`.
+> `manifest.json` in this pipeline's schema and no foreground masks. Use
+> `orhsurf fetch --clip C001 --convert --frames 0-4` to prepare HEVC inputs with default
+> all-foreground RGBA masks; `--masks` overrides the default. See `docs/DATA_CONTRACT.md`.
 
 | What | Size |
 |---|---|

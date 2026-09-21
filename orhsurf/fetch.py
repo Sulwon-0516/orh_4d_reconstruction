@@ -56,11 +56,10 @@ def fetch_clip(clip: str, data_root: Path, convert: bool = False,
                masks: str | None = None, frames: str | None = None) -> int:
     """Download and extract one clip archive.
 
-    WHAT THIS DOES NOT DO, stated up front because the docs used to imply otherwise: the published
-    archive does NOT contain a `manifest.json` in the schema this pipeline's loader needs, and it
-    ships NO foreground masks -- which `orhsurf run` requires in two places. So this fetches and
-    extracts the raw capture, and then tells you plainly what is still missing rather than letting
-    you discover it three stages into a run. See docs/DATA_CONTRACT.md.
+    Raw archives contain RGB data and calibration, but no foreground masks. With
+    convert=True, fetch HEVC and prepare a manifest with all-foreground masks by
+    default; explicit masks override that policy. Without conversion, report
+    missing pipeline inputs after extraction.
     """
     from huggingface_hub import hf_hub_download
 
@@ -119,18 +118,16 @@ def _report_missing(dest: Path, clip: str) -> None:
             print(f"  - {p}")
         print("  This is a known gap between the published dataset and the input contract.\n"
               "  HEVC conversion: orhsurf fetch --clip <id> --convert --frames 0-4.\n"
-              "  The converter does not generate masks. See docs/DATA_CONTRACT.md.")
+              "  Conversion generates all-foreground masks by default. See docs/DATA_CONTRACT.md.")
 
 
 def convert_clip(clip_dir: Path, out_dir: Path, masks: str | None = None,
                  frames: str | None = None) -> int:
     """Decode the archive's videos and emit a manifest this pipeline can load.
 
-    Separated from fetch_clip so an already-extracted archive can be converted without
-    re-downloading 1.5 GB.  Masks are NOT invented here: --masks points at a directory laid out as
-    <masks>/<serial>/<encoded_frame_index:05d>.png (RGBA, foreground in ALPHA).  Without it the
-    manifest is written with mask_path=None and this function says exactly which step is still
-    missing, because prep.py asserts a mask per view and >= 8 non-empty ones.
+    Existing extracted inputs can be reused without downloading. Omitting --masks selects
+    all-foreground RGBA masks (alpha=255). Explicit masks override this default and are
+    never silently filled in when incomplete. The manifest records the chosen policy.
     """
     import json
     from . import convert as C
@@ -153,13 +150,12 @@ def convert_clip(clip_dir: Path, out_dir: Path, masks: str | None = None,
               f"({want[0]}..{want[-1]}, {len(want) / fps:.1f} s) -- --frames {frames}")
 
     rgb_root = C.decode_views(clip_dir, out_dir, serials, n, frames=want)
+    mask_mode = "all_foreground" if masks is None else "provided"
     if masks is None:
-        # The published archives ship no masks and this package has no segmenter. AmbiSuR does not
-        # read the alpha, so an all-foreground mask makes the clip runnable without changing the
-        # reconstruction; --masks <dir> overrides it. See write_all_foreground_masks.
-        masks = C.write_all_foreground_masks(clip_dir, rgb_root, out_dir / "masks")
+        # This default changes the visual-hull centre and potentially the DA3 groups.
+        masks = C.write_all_foreground_masks(clip_dir, rgb_root, out_dir / "masks_all_foreground", frames=want)
     man_path = out_dir / "manifest.json"
-    _man, missing = C.build_manifest(clip_dir, rgb_root, masks, man_path, frames=want)
+    _man, missing = C.build_manifest(clip_dir, rgb_root, masks, man_path, frames=want, mask_mode=mask_mode)
 
     if missing:
         views = len({s for s, _ in missing})
@@ -168,8 +164,7 @@ def convert_clip(clip_dir: Path, out_dir: Path, masks: str | None = None,
         print(f"[convert] will stop in prep: it asserts a foreground mask per view and needs >= 8")
         print(f"[convert] non-empty ones. Supply them with --masks <dir>, laid out as")
         print(f"[convert]   <dir>/<serial>/<frame:05d>.png   RGBA, foreground in the ALPHA channel")
-        print(f"[convert] The published archives do not carry masks; generating them is not part")
-        print(f"[convert] of this package. See docs/DATA_CONTRACT.md.")
+        print("[convert] Explicit masks were supplied; missing masks are not replaced by defaults.")
         return 3
     print(f"[convert] ready: orhsurf run --clip {man_path}")
     return 0

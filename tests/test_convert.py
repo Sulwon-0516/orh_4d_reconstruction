@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from orhsurf.convert import parse_frames, decode_views, build_manifest
 from orhsurf.paths import read_manifest
@@ -37,7 +38,7 @@ class ConvertTests(unittest.TestCase):
             self.assertEqual(f['frame_path'], str(root/'prepared/rgb/cam/00040.png'))
             self.assertIsNone(f['mask_path'])
             self.assertEqual(out.read_bytes(), original)
-            with self.assertRaises(KeyError):
+            with self.assertRaisesRegex(AssertionError, "not in this manifest"):
                 frame_of(m['cameras']['cam'], 0)
 
     def test_relative_list_and_dict_paths(self):
@@ -48,6 +49,39 @@ class ConvertTests(unittest.TestCase):
                 p.write_text(json.dumps({'cameras': {'cam': {'frames': frames}}}))
                 f = frame_of(read_manifest(p)['cameras']['cam'],0)
                 self.assertEqual(f['frame_path'],str(p.parent/'rgb/0.png'))
+
+    def test_default_masks_and_explicit_override(self):
+        from PIL import Image
+        from orhsurf.fetch import convert_clip
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vm = dict(window={'n_timestamps': 1, 'duration_s': 1}, valid_serials=['cam'],
+                      cameras={'cam': dict(width=2048, height=1536, valid=True)})
+            (root/'video_manifest.json').write_text(json.dumps(vm))
+            rgb = root/'rgb'
+            (rgb/'cam').mkdir(parents=True)
+            (rgb/'cam/00000.png').touch()  # decoding is mocked in this policy test
+            out = root/'prepared'
+            with patch('orhsurf.convert.decode_views', return_value=rgb):
+                self.assertEqual(convert_clip(root, out, frames='0'), 0)
+                m = read_manifest(out/'manifest.json')
+                self.assertEqual(m['mask_policy']['mode'], 'all_foreground')
+                with Image.open(frame_of(m['cameras']['cam'],0)['mask_path']) as im:
+                    self.assertEqual(im.mode, 'RGBA')
+                    self.assertEqual(im.size, (2048,1536))
+                    self.assertEqual(im.getchannel('A').getextrema(), (255,255))
+                supplied = root/'provided/cam'
+                supplied.mkdir(parents=True)
+                mask = supplied/'00000.png'
+                Image.new('RGBA',(2048,1536),(0,0,0,128)).save(mask)
+                before = mask.read_bytes()
+                self.assertEqual(convert_clip(root,out,masks=str(supplied.parent),frames='0'),0)
+                m = read_manifest(out/'manifest.json')
+                self.assertEqual(m['mask_policy']['mode'],'provided')
+                self.assertEqual(mask.read_bytes(),before)
+                self.assertEqual(frame_of(m['cameras']['cam'],0)['mask_path'],str(mask))
+                self.assertEqual(convert_clip(root,out,masks=str(root/'missing'),frames='0'),3)
+                self.assertIsNone(frame_of(read_manifest(out/'manifest.json')['cameras']['cam'],0)['mask_path'])
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg required')
     def test_sparse_video_decode_matches_source_indices(self):
