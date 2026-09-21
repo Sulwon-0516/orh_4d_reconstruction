@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from orhsurf.simplify import normal_codes, grid_keys, representatives, select_points
+from orhsurf.simplify import normal_codes, grid_keys, representatives, select_points, stratified_points
 
 
 class SimplifyTests(unittest.TestCase):
@@ -38,5 +38,27 @@ class SimplifyTests(unittest.TestCase):
         self.assertNotEqual(codes[0],codes[1])
         with self.assertRaises(ValueError):
             normal_codes(np.array([[np.nan,0,0]],np.float32))
+
+    def test_stratified_preserves_density_proportions_exactly_when_integral(self):
+        xyz=np.zeros((1110,3),np.float32)
+        xyz[1000:1100,0]=2;xyz[1100:,0]=4
+        idx,info=stratified_points(xyz,222,voxel_m=1)
+        self.assertEqual([int(np.count_nonzero(xyz[idx,0]==v)) for v in (0,2,4)],[200,20,2])
+        self.assertEqual(len(np.unique(idx)),222)
+        self.assertEqual(info['max_quota_error_points'],0)
+
+    def test_stratified_rounding_is_bounded_and_seeded(self):
+        xyz=np.zeros((37,3),np.float32);xyz[:,0]=np.repeat([0,2,4],[20,10,7])
+        a,info=stratified_points(xyz,9,voxel_m=1,seed=4)
+        b,_=stratified_points(xyz,9,voxel_m=1,seed=4)
+        np.testing.assert_array_equal(a,b)
+        self.assertEqual(len(a),9)
+        self.assertLess(info['max_quota_error_points'],1)
+
+    def test_stratified_does_not_claim_minimum_one(self):
+        xyz=np.arange(30,dtype=np.float32).reshape(10,3)
+        idx,info=stratified_points(xyz,3,voxel_m=.1)
+        self.assertEqual(len(idx),3)
+        self.assertEqual(info['dropped_strata'],7)
 
 if __name__=='__main__': unittest.main()

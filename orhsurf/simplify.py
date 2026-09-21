@@ -112,12 +112,57 @@ def select_points(xyz, normal, support, target, angle=30.0, attempts=12, log=pri
                          zero_normal_policy='separate unknown-direction bin; never merged with valid normals')
 
 
+def stratified_points(xyz, target, voxel_m=0.05, seed=0):
+    """Proportional per-cell quotas, rounded by largest remainder; random within each cell.
+
+    No minimum-one policy: preserves density ratios to within one point per cell while
+    hitting the exact total. Cells whose ideal quota is below one may receive zero.
+    """
+    import numpy as np
+    n = len(xyz)
+    if not 1 <= target <= n or not np.isfinite(xyz).all():
+        raise ValueError('invalid target or non-finite positions')
+    if not math.isfinite(voxel_m) or voxel_m <= 0:
+        raise ValueError('stratum voxel size must be positive')
+    origin = np.floor(xyz.min(axis=0).astype(np.float64)/voxel_m)*voxel_m
+    keys = grid_keys(xyz, np.zeros(n,np.uint64), 1, origin, voxel_m)
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(n)
+    order = order[np.argsort(keys[order],kind='stable')]
+    sorted_keys = keys[order]
+    starts = np.r_[0,np.flatnonzero(sorted_keys[1:] != sorted_keys[:-1])+1]
+    counts = np.diff(np.r_[starts,n])
+    # Integer arithmetic avoids floating-point quota rounding and ensures the exact total.
+    if n*target > np.iinfo(np.int64).max:
+        raise ValueError('point count exceeds int64 quota arithmetic')
+    numerator = counts.astype(np.int64)*target
+    quotas = numerator//n
+    remainder = numerator%n
+    extra = target-int(quotas.sum())
+    if extra:
+        ties = rng.permutation(len(counts))
+        winners = ties[np.argsort(-remainder[ties],kind='stable')[:extra]]
+        quotas[winners] += 1
+    local_index = np.arange(n)-np.repeat(starts,counts)
+    selected = order[local_index < np.repeat(quotas,counts)]
+    selected.sort()
+    assert len(selected)==target
+    info = dict(stratum_voxel_m=voxel_m, grid_origin=origin.tolist(), seed=seed,
+                source_strata=len(counts), retained_strata=int(np.count_nonzero(quotas)),
+                dropped_strata=int(np.count_nonzero(quotas==0)), retention_ratio=target/n,
+                max_quota_error_points=float(np.max(np.abs(quotas-counts*(target/n)))),
+                quota_policy='largest remainder; no minimum-one guarantee',
+                normal_policy='not used for sampling; original normals retained')
+    return selected,info
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True, help='completed source frame directory')
     parser.add_argument('--out', type=Path, required=True, help='new derived-output root')
     parser.add_argument('--targets', default='10000000,5000000,1000000')
-    parser.add_argument('--method', choices=('normal-voxel', 'random'), default='normal-voxel')
+    parser.add_argument('--method', choices=('normal-voxel', 'random', 'stratified'), default='normal-voxel')
+    parser.add_argument('--voxel-mm', type=float, default=50, help='stratified spatial cell size; default 50 mm')
     parser.add_argument('--seed', type=int, default=0, help='random subsampling seed')
     parser.add_argument('--normal-angle', type=float, default=30)
     parser.add_argument('--search-steps', type=int, default=12)
@@ -152,7 +197,10 @@ def main():
         if dest.exists() or dest == source:
             raise FileExistsError(f'refusing to overwrite {dest}')
         start = time.monotonic()
-        if args.method == 'random':
+        if args.method == 'stratified':
+            indices, info = stratified_points(arrays['xyz'],target,args.voxel_mm/1000,args.seed)
+            method = 'spatially stratified proportional random sample'
+        elif args.method == 'random':
             indices = np.random.default_rng(args.seed).choice(n, target, replace=False)
             indices.sort()
             info = dict(seed=args.seed)

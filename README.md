@@ -215,6 +215,21 @@ unknown-direction bin. See [library alternatives](detail.md#point-cloud-simplifi
 Keeping the original and all three versions adds storage; savings require choosing which derived
 version to retain later. Nothing deletes the original automatically.
 
+For density-preserving **spatial stratified sampling**, assign every 5 cm cell a point quota
+proportional to its original population, then randomly choose within each cell:
+
+```bash
+"$ORHSURF_PYTHON" -m orhsurf.simplify --source out/C001/00000 --out out/C001_stratified \
+  --method stratified --voxel-mm 50 --targets 10000000,5000000,1000000 --cpus 2
+```
+
+This retains the original dense/sparse distribution to within one point of each cell's ideal
+quota while hitting the exact total. It does **not** collapse each cell to one point or normalize
+spatial density. Largest-remainder rounding distributes the integer quotas; cells with an ideal
+quota below one may receive zero. There is no minimum-one guarantee. Normals are retained as
+attributes but do not influence this sampling method. The 5 cm region size is configurable and
+is an initial comparison setting, not a measured optimum.
+
 For a simple random baseline, use the same exporter with `--method random`:
 
 ```bash

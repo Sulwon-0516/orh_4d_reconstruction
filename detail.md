@@ -320,3 +320,51 @@ The new `process` wrapper's orchestration tests check full-range discovery, clip
 manifest-preserving resume and stopping on reconstruction/verification failure. Heavy stages
 are replaced with test doubles in those tests. Existing real single-frame pipeline execution
 has passed; the new multi-clip command has not yet completed a real multi-clip GPU run.
+
+
+## Scaling deployment to many clips
+
+Install once on a compute node into a shared checkout/environment and cache, then reuse those
+paths from batch jobs. CUDA extension builds must cover the target GPU architectures and the
+nodes must have compatible drivers/libraries; an A100-only build is not automatically portable
+to RTX 3090. Do not run installation concurrently inside every array task.
+
+The clip-array script requests one node and one GPU per task by default. `%10` limits running
+array tasks, not node count. For a homogeneous eight-GPU node pool, this submission shape requests
+eight GPUs for each of up to ten concurrent clip tasks (supply real site/project/time options):
+
+```bash
+sbatch --array=0-99%10 --nodes=1 --gres=gpu:8 \
+  slurm/process_clips.sbatch --gpus 8 C{001..100}
+```
+
+This is a Bash brace-expansion example and was not submitted. Node packing, availability and
+account limits remain scheduler decisions. The inspected pinned archive inventory contains
+C001 through C100; the total-work estimate assumes all have the 225 frames measured for C001.
+At 14.3 minutes per frame, 100 x 225 frames = 5,362.5 GPU-worker hours. Eighty equally fast GPUs
+would take about 67 hours under ideal scaling; 12 hours would require about 447 such GPUs before
+extra overhead. A 3-hour debug limit cannot fit the estimated 6.7-hour eight-GPU whole-clip task.
+Use a permitted production partition or separately designed frame-chunk tasks; do not bypass
+limits with resubmission loops. Chunked multi-clip scheduling is not implemented by this script.
+
+Recommended order: install shared environments/weights; validate one clip; validate multi-GPU
+throughput and CPU/RAM budgets on one node; prepare the intended inputs; submit a bounded array;
+verify all expected outputs and keep the selected point budget. Input preparation can remain
+inside each allocation or be staged first. For many jobs, pre-staging avoids simultaneous
+model downloads and makes failures easier to diagnose. Decoding shared inputs must happen once
+per clip, before any frame-sharded consumers use its manifest.
+
+The single-frame estimates imply roughly 13.9 TB of full point clouds and 5.3 TB of decoded
+inputs across 100 C001-sized clips. A 5M retained point budget is roughly 2.8 TB, 1M roughly
+0.56 TB, excluding inputs/environment/scratch. These are extrapolations, not storage scans.
+The current simplifier creates additional derived files and never deletes full outputs. Storage
+savings therefore require a deliberate retention decision after quality checks. Postprocessing
+point count does not reduce the 7,000-iteration training work.
+
+
+Spatial stratified sampling was exercised on C001 frame 0 with 50 mm cells: 47,981 populated
+cells. The 10M / 5M / 1M products were 245.9 / 123.7 / 25.0 MB and took 39.9 / 24.6 / 11.7 seconds
+respectively after the shared source load, including write/readback validation. Integer quotas
+left 1,938 / 3,083 / 7,699 cells empty respectively; these are primarily low-population cells and
+are reported explicitly rather than promising minimum coverage. The maximum deviation from a
+cell's ideal fractional quota stayed below one point. Attributes remain exact source values.
