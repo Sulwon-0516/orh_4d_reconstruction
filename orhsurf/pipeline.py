@@ -90,9 +90,27 @@ class Recipe:
         """Warmups at 0.4x the budget -- the ratio used for every measured run (7000 -> 2800)."""
         return int(self.iterations * 0.4)
 
+    #: Fields added after the first retained runs were written. They are excluded from hash() when
+    #: they hold the value the pipeline used before they existed, so adding a knob does not
+    #: invalidate outputs it did not change. Setting one to anything else DOES change the hash,
+    #: because then it really did change the output.
+    _HASH_BACKCOMPAT_DEFAULTS = {"densify_from_iter": 500, "densification_interval": 100}
+
     def hash(self) -> str:
+        """Identity of the settings that produced an output.
+
+        retention.py compares this against a stored receipt to decide whether a previous run can be
+        resumed. A naive asdict() hash means MERELY ADDING A FIELD invalidates every existing
+        output, even when the new field's default reproduces the old behaviour exactly -- which is
+        the case here: 500/100 are AmbiSuR's own defaults (third_party/AmbiSuR/arguments/__init__.py
+        :94,96), so before these fields existed the schedule was already 500/100.
+        """
         import hashlib
-        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()[:16]
+        d = asdict(self)
+        for k, v in self._HASH_BACKCOMPAT_DEFAULTS.items():
+            if d.get(k) == v:
+                d.pop(k, None)
+        return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:16]
 
 
 class StageTimer:
