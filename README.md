@@ -4,6 +4,11 @@ One multi-view clip → one filtered surface point cloud per timestamp, in calib
 
 ## TL;DR — one GPU, first frame, then five
 
+**`orhsurf` is this repository's command-line interface.** Running `./install.sh` creates
+`bin/orhsurf` and the Python environments. Then `source env.sh` adds that executable to your
+current shell's PATH and selects the installed interpreters. You do not install a separate
+`orhsurf` package or need to activate conda manually after setup.
+
 Use a **40 GB+ GPU** for the default recipe (tested on A100 80 GB). Have conda/mamba,
 CUDA Toolkit and a supported compiler on PATH. Run installation and processing on a compute node.
 
@@ -14,8 +19,10 @@ srun --partition=debug --gres=gpu:1 --time=03:00:00 --pty bash
 # Inside the allocated compute shell:
 git clone https://github.com/Sulwon-0516/orh_4d_reconstruction.git
 cd orh_4d_reconstruction
-./install.sh --no-weights
-source env.sh
+./install.sh --no-weights       # creates env/, env-da3/, env.sh and bin/orhsurf
+source env.sh                   # makes the orhsurf command available in THIS shell
+command -v orhsurf              # should print <this-checkout>/bin/orhsurf
+orhsurf --help                  # lists the available commands
 orhsurf fetch --weights
 orhsurf fetch --clip C001 --convert --frames 0-4
 orhsurf doctor
@@ -26,6 +33,15 @@ orhsurf verify --out out/C001
 orhsurf run --clip data/C001_prepared/manifest.json --gpus 1 --frames 0-4 --out out/C001
 orhsurf verify --out out/C001                   # expect 5/5
 ```
+
+Command guide: `fetch` downloads/prepares inputs, `doctor` checks the environment, `run`
+reconstructs the selected frames, and `verify` checks the generated files. For options, use
+`orhsurf run --help` (or the corresponding subcommand).
+
+**In every new terminal or batch script**, change into the checkout and run `source env.sh`
+again. If you see `orhsurf: command not found`, this shell setup is the first thing to check.
+After installation, `./bin/orhsurf --help` also works directly from the checkout; the launcher
+loads `env.sh` itself. It runs the installed Python's `-m orhsurf.cli` entry point.
 
 For an existing checkout/environment, start at `source env.sh`; reuse prepared data and weights.
 `debug` and its three-hour limit are from the tested cluster: use your site's actual partition
