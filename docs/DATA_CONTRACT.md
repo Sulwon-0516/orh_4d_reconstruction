@@ -121,7 +121,7 @@ re-centred at all.
 ## Output
 
 ```
-<out>/<clip-id>/<frame:05d>/
+<explicit --out>/<frame:05d>/
     surface.npz           xyz (N,3) f4 · normal (N,3) f4 · rgb (N,3) u1
                           confidence (N,) f4 · observed (N,) bool · support (N,) i16
     surface_export.json   point counts and every filter parameter actually used

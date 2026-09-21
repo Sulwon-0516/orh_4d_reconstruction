@@ -1,0 +1,239 @@
+# Implementation details and historical measurements
+
+Start with [README.md](README.md) for the supported first-run commands and result format.
+This page holds background, prior experiments and troubleshooting; historical numbers below
+are **not** the current C001/A100 deployment benchmark.
+
+## Current validation (2026-09-21)
+
+The compute-node installation and an existing Slurm allocation were exercised with one A100
+80 GB PCIe, 20 allocated CPUs, and 150,794 MiB allocated host memory. Reconstruction used eight
+CPU threads; that is a program limit, not a new Slurm resource request. Both Python 3.10
+environments, CUDA extension operations, full `doctor`, DA3 inference, 7,000-iteration training,
+export, deep verification and the first static preview passed for C001 frame 0.
+Frame 1 also completed (25,458,442 points); subsequent frames are being processed; a complete 225-frame run is **not yet validated**.
+The generic job-array/multi-GPU templates have not been validated on this cluster.
+
+Main env: torch 2.7.1+cu128; DA3 env: torch 2.6.0+cu124 with numpy 2.2.6.
+CUDA extensions built with Toolkit 12.4 and GCC 11.4; actual GPU operations passed.
+DA3's upstream numpy<2 package metadata conflicts with this numpy pin: runtime tests passed,
+but this does not mean `pip check` is clean.
+
+Measured frame-0 stage seconds: prep 3.03, dataset build 31.80, scene build 14.86,
+DA3 147.75, rewarp 14.06, training 517.18, export 125.28. End-to-end: approximately 14.3 minutes.
+DA3 used 1008 px, groups of 18 with overlap 6, four groups, peak 24,745 MiB allocated.
+This all-foreground-mask case exceeds a nominal 24 GB card; the earlier 23,353 MiB result
+below belongs to another run. Prefer a 40 GB or larger GPU for this default workflow.
+
+## Installation and paths
+
+Use conda/mamba/micromamba on PATH, CUDA nvcc and a supported host compiler on a compute node.
+`./install.sh --no-weights` creates `env/`, `env-da3/`, compiles extensions, then checks imports;
+`orhsurf fetch --weights` downloads the 6.76 GB checkpoint. `source env.sh` selects the absolute
+interpreters and cache paths; it does not activate bare `python` or `pip`.
+Use `"$ORHSURF_PYTHON"` for auxiliary tools and optional packages.
+
+The fresh-install bug was an early `scene.cameras` import before CUDA extensions existed.
+The check now runs after extension installation, followed by real CUDA operations.
+Build, decoder, filter and encoder thread counts are bounded by the allocation.
+
+Choose `ORHSURF_CACHE_DIR` before installation and `ORHSURF_DATA_ROOT` / `ORHSURF_OUT_ROOT`
+before sourcing `env.sh` when overriding defaults. Prefer explicit `--out` and `--work`.
+Relative image and mask paths resolve against the manifest directory. Old absolute paths
+must be remapped explicitly into a new manifest; originals are preserved.
+Do not expand or rewrite a prepared manifest while a run uses it: resume fingerprints include
+its path, size and modification time. Prepare a new directory and use disjoint frame ranges
+for continuation if an active subset must stay untouched.
+
+## Input conversion and masks
+
+`fetch --convert --clip C001 --frames 0-4` selects `hevc/C001.tar`, extracts into
+`data/_hevc/C001`, decodes selected frames into `data/C001_prepared`, and writes a local manifest.
+The plain `fetch --clip C001` path prefers the JPEG archive; it is not the documented HEVC
+conversion workflow. The original JPEG directory is not overwritten by HEVC extraction.
+
+The published clip has 47 valid cameras and 225 encoded frames (15 seconds at 15 fps).
+Decode indices are `encoded_frame_index`, never the source video's `video_frame_index`.
+The converter checks frame counts and preserves nonzero/sparse frame indices.
+The CLI rejects requests outside `decoded_frames` before GPU dispatch.
+
+Without `--masks`, the converter generates all-foreground RGBA masks and records that policy.
+With `--masks`, missing supplied masks are errors. Masks affect visual-hull camera grouping;
+they do not make the reconstructed point cloud foreground-only. See [the input contract](docs/DATA_CONTRACT.md).
+
+An extracted clip can be converted without downloading again:
+
+```python
+from pathlib import Path
+from orhsurf.fetch import convert_clip
+assert convert_clip(Path("data/_hevc/C001"), Path("data/C001_full_prepared"), frames="0-224") == 0
+```
+
+## Recipe and numerical background
+
+### Default recipe
+
+| | value | note |
+|---|---|---|
+| resolution | `-r 2` | half res |
+| DA3 prior | **1008**, our calibrated poses passed in | groups of 18, overlap 6 |
+| training | AmbiSuR, **7000** iterations, warmups at 0.4× | |
+| export filter | `--min-views 2 --nn-k 5 --nn-max-mm 5.0` | a point is dropped if its 5th-nearest neighbour is > 5 mm away |
+
+Every one of these is passed **explicitly at every call site**, never inherited from an argparse
+default. That is deliberate: in the source project, changing the exporter's defaults silently
+altered the output of an unrelated analysis script.
+
+Measured on frame 37: the filter takes **31,184,126 → 25,475,445** points (4,145,365 dropped for
+support < 2, a further 1,563,316 as isolated).
+
+### An honest note on 1008 vs 504
+
+The 1008 prior is the default because the user judged the 3D reconstructions better by eye. The
+aggregate metrics do **not** separate the two: on frame 37, the only frame where both were run,
+PSNR was 23.492 (1008) vs 23.538 (504), with point counts and hole fractions within noise. PSNR is
+a poor instrument for the defect that matters here — floaters are too few points to move it — so
+this is recorded as unresolved rather than as evidence either way. The 504 path remains available
+as a documented fallback for GPUs under 24 GB.
+
+### Why two Python environments
+
+Measured, not stylistic. The identical DA3 inference under the two torch builds differs by ~900×
+the run-to-run nondeterminism:
+
+| | mean \|Δdepth\| | p99.9 |
+|---|---|---|
+| same env, twice | 1.3e-06 m | 4.8e-07 m |
+| torch 2.6.0+cu124 vs 2.7.1+cu128 | 1.2e-03 m | 3.5e-02 m |
+
+The reference reconstruction was produced on 2.6.0+cu124, so the DA3 stage is pinned there
+(`env-da3/`) while AmbiSuR keeps 2.7.1+cu128 (`env/`). Reproduce with `tools/da3_env_compare.py`.
+
+**PyTorch3D is not needed.** AmbiSuR imported it for exactly one function; `orhsurf/quat.py`
+replaces it. `tests/test_quat.py` always checks orthonormality and known rotations, and compares
+against the real PyTorch3D **only when it is importable** — on a machine where it was, the max
+absolute difference was 1.1e-15. `install.sh` does not install PyTorch3D, so on a clean install
+that comparison reports **SKIP**, not PASS: the figure above comes from a development machine, not
+from your install.
+
+## Durability
+
+Built for preemptible clusters, because interrupted runs have already cost this project real data:
+
+- Outputs are written to a temp name, fsynced, then renamed — never written in place.
+- Each frame is built in a staging directory and swapped in only when complete, so **a crashed
+  re-run cannot destroy a good frame**.
+- `_DONE.json` is written last and checked first; resume never trusts file existence.
+- `orhsurf verify` opens every array. Run it after any interruption.
+
+The failure this defends against is real: the source project holds two truncated 494 MB
+`surface.npz` files (against a healthy ~757 MB) whose zip magic bytes are intact, so a cheap header
+check passes and the failure only appears as `BadZipFile` inside a render, hours later. One of them
+is *newer* than its own sidecar files — a re-run overwrote a good output and then died.
+
+## Historical performance experiments
+
+These are earlier development-host observations, not current deployment guarantees.
+
+### Earlier two-GPU run
+
+This exact command was run on the development machine (2 frames, 2 GPUs) and produced filtered
+clouds:
+
+```bash
+orhsurf run --clip <clip-id-or-path-to-manifest.json> --frames 40-41 --gpus 2
+```
+
+| frame | points (filtered) | dropped: support<2 | dropped: isolated |
+|---|---|---|---|
+| 00040 | **25.4 M** (±0.5%) | ~4.11–4.18 M | ~1.54–1.56 M |
+| 00041 | **25.47 M** (±0.05%) | ~4.10–4.11 M | ~1.53–1.57 M |
+
+**These counts are not deterministic.** Three independent runs of frame 40 with identical code and
+inputs gave 25,493,841 / 25,426,861 / 25,366,727 — a **0.50% spread**. AmbiSuR's densification
+samples views in a random order, so the fitted Gaussian count varies run to run (measured 648,689
+to 667,291, a 2.8% spread) and the exported point count follows it. Quote these with a tolerance;
+a sub-percent difference between two runs is not a regression.
+
+`orhsurf verify` → `2/2 frames ok, 50,962,741 points total`. Wall clock 19.5 min for both frames in
+parallel, on a heavily contended box (load average ~65–98 from unrelated jobs).
+
+Per-frame stage timings (frame 00040): prep 2 s, dataset_build 35 s, scene_build 16 s,
+**da3_1008 88 s**, rewarp 19 s, **train 706 s**, **export 296 s**.
+
+The DA3 stage reproduced the reference recipe exactly: torch peak **23,353 MiB** (reference:
+23,353 MiB), worst scene-frame coverage **1.00000**, 50,000-point initial cloud. The k-NN gate
+reported `k=5 median 2.419 mm`; its drop counts differ from the reference frame's by **+1.25%**
+and **+2.33%** — a different frame, so they are not expected to match exactly.
+
+### Wall time — two numbers that do not agree
+
+Per-stage, frame 00040, one RTX 4090, 8 cores, `-r 2` × 7k:
+
+```
+prep 2 s · dataset_build 35 s · scene_build 16 s · da3_1008 88 s · rewarp 19 s
+train 706 s · export 296 s                    = 1,162 s = 19.4 min
+```
+
+End-to-end:
+
+| run | measured |
+|---|---|
+| 1 frame, 1 GPU | **11.1 min** |
+| 2 frames, 2 GPUs | **19.5 min** and **19.1 min** (two independent runs) |
+| 8 frames, 8 GPUs | 74.1 min — **invalid**, that run was CPU-capped to 8 cores *total* |
+
+**The stage sum (19.4 min) and the single-frame end-to-end (11.1 min) do not agree, and we do not
+know why** — the load each was taken under was not recorded. Both are reported rather than
+averaged. Do not size a job from 11 min alone.
+
+**Per-frame time is not independent of concurrency.** One frame alone is 11.1 min; two frames on
+two GPUs take ~19 min *each*, measured twice. That is a **~1.7× slowdown at only 2-way
+concurrency**, and it is the number that matters for `--time`. The 8-GPU figure is genuinely
+unmeasured: the only 8-way run was CPU-starved and proves nothing about throughput. So:
+
+- optimistic (frames independent): 150 frames ÷ 8 GPUs × 11.1 min ≈ **3.5 h**
+- with the measured 2-way penalty applied: 150 ÷ 8 × 19 min ≈ **5.9 h**
+
+Request time against the second, and note that 8-way contention may be worse than 2-way.
+
+**`export` roughly doubled — 296 s → 781 s on frame 40 — after the durability change**, because
+every ~620 MB payload is now fsynced before the completion marker. That is the cost of the
+guarantee actually holding. The 19.4 min stage sum above is **pre-fsync**; a post-fsync frame is
+roughly 8 min longer.
+
+### Disk warnings, learned the hard way
+
+- **`--write-ply` nearly doubles a clip to ~198 GB.** On the development box accumulated PLYs
+  reached ~110 GB and filled the filesystem to **99.9%, 0 bytes available**. Throughput collapsed
+  to a few MB/min, `rm` took ~18 s *per file*, and five processes wedged in uninterruptible `D`
+  state. On a shared cluster scratch this affects other people. **Check your quota before
+  launching a full clip**, and leave PLY off unless you need it.
+- **Scratch is kept on failure, by design** — it holds the trained model and DA3 depths, ~13 min of
+  GPU work. A run with many failures therefore accumulates **~6 GB per failed frame**. Clean up
+  `<out>/_work/` after a bad run.
+
+### Point counts are not reproducible to the digit
+
+Three independent runs of frame 40, identical code and inputs:
+
+```
+25,493,841   25,426,861   25,366,727      -> 0.50% spread
+```
+
+while the **pre-filter** cloud reproduced to ~1e-5. **The cause is not established.** Each of the
+three runs trained separately, so the filter never saw the same input twice — nothing in that data
+separates AmbiSuR's training variance from sensitivity in the filter itself. Treat a sub-percent
+difference between two runs as expected, and do not compare point counts to the digit.
+
+## Further references
+
+- [Slurm setup and troubleshooting](docs/INSTALL_SLURM.md)
+- [Manifest and camera conventions](docs/DATA_CONTRACT.md)
+- `tools/check_cuda_env.py`: actual CUDA smoke tests in the selected environment.
+- `tests/test_convert.py`: sparse conversion, manifest paths and mask policy regressions.
+- `tools/render_sequence.py`: fixed-camera sequence contact sheet and decodable MP4.
+
+AmbiSuR is vendored with its upstream `third_party/AmbiSuR/LICENSE.md`.
+DA3 code and checkpoint retain their upstream terms; weights, data and generated environments
+are not committed. Review upstream terms before redistributing them.
