@@ -359,8 +359,8 @@ def cmd_doctor(a) -> int:
     interpreter for it reported a failure on every correct install.
     """
     phase = getattr(a, "phase", "full") or "full"
-    want_ext = phase == "full"
-    want_gpu = phase == "full"
+    want_ext = phase in ("full", "noweights")
+    want_gpu = phase in ("full", "noweights")
     want_weights = phase == "full"
     ok = True
 

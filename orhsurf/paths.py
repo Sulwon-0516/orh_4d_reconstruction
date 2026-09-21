@@ -19,12 +19,35 @@ Env vars, all optional:
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sys
 from pathlib import Path
 
 #: repo root = the directory containing the `orhsurf` package
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def read_manifest(path: Path) -> dict:
+    """Resolve input paths against the manifest, without modifying the source file.
+
+    Existing absolute paths are preserved; obsolete machine-specific absolute paths
+    must be explicitly remapped by the data owner, never guessed by basename.
+    """
+    path = Path(path).expanduser().resolve()
+    with path.open() as f:
+        manifest = json.load(f)
+    for camera in manifest.get("cameras", {}).values():
+        frames = camera.get("frames", [])
+        entries = frames.values() if isinstance(frames, dict) else frames
+        for entry in [camera, *entries]:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("frame_path", "image_path", "mask_path"):
+                if entry.get(key):
+                    value = Path(entry[key]).expanduser()
+                    entry[key] = str(value if value.is_absolute() else path.parent / value)
+    return manifest
 
 
 def _env_path(var: str) -> Path | None:

@@ -65,22 +65,44 @@ export PATH="$HOME/bin:$PATH"
 
 ```bash
 git clone <this repo> orhsurf && cd orhsurf
-./install.sh                     # two conda envs, CUDA extensions, DA3 weights (6.76 GB)
+./install.sh --no-weights        # two Python envs + CUDA extensions; use a compute node
 source env.sh
+orhsurf doctor --phase noweights
 
-orhsurf doctor                   # check everything at once
-orhsurf fetch --clip C001        # downloads + extracts the clip archive -- but see the warning below
-orhsurf run --clip C001 --gpus 1 --frames 0-0     # smoke test: one frame, 11-19 min
-orhsurf verify --clip C001       # open every output and check it
-
-> **`fetch --clip` does not yet give you a runnable clip.** It downloads and extracts the published
-> archive, then tells you what is missing. The archive has no `manifest.json` in this pipeline's
-> schema and **no foreground masks**, both of which `orhsurf run` requires. There is no converter in
-> this package yet. See [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md).
-
-`--clip` accepts a clip id (resolved under `ORHSURF_DATA_ROOT`), a clip directory, or a path to a
-`manifest.json`. `run` and `verify` accept all three forms.
+# One published HEVC clip, only the five frames needed for this test:
+orhsurf fetch --clip C001 --convert --frames 0-4
 ```
+
+The conversion command downloads only `hevc/C001.tar`, extracts into `data/_hevc/C001`, and
+writes decoded images plus `data/C001_prepared/manifest.json`. An existing JPEG clip at
+`data/C001` is preserved. `fetch --clip C001` without `--convert` still prefers the JPEG archive.
+Conversion decodes on CPU, with thread counts limited by the current allocation. Downloads and
+conversion may run inside an existing GPU compute allocation; no separate Slurm submission is
+inherently required. Follow your site's rules and do not run heavy work on a login node.
+
+**The published clip has no masks.** Without masks, conversion writes the images and manifest but
+returns **exit code 3**, explicitly reporting missing inputs. This is not reconstruction success.
+Do not substitute empty or all-white masks. Provide validated RGBA foreground masks at
+`<mask-dir>/<camera-serial>/<encoded-frame-index:05d>.png`. Then:
+
+```bash
+orhsurf fetch --clip C001 --convert --frames 0-4 --masks /absolute/path/to/validated/masks
+orhsurf fetch --weights
+orhsurf doctor
+orhsurf run --clip data/C001_prepared/manifest.json --gpus 1 --frames 0-0
+orhsurf verify --clip data/C001_prepared/manifest.json
+# Inspect the first frame and its preview before expanding; completed frame 0 is reused.
+orhsurf run --clip data/C001_prepared/manifest.json --gpus 1 --frames 0-4
+orhsurf verify --clip data/C001_prepared/manifest.json
+```
+
+`--clip` accepts a clip id under `ORHSURF_DATA_ROOT`, a directory, or a manifest path.
+Relative image/mask paths are resolved against the manifest directory, without rewriting the
+original JSON. Converted frame subsets retain their true encoded indices, including nonzero or
+noncontiguous selections. The converter does not generate masks; see [the input contract](docs/DATA_CONTRACT.md).
+
+For an already-extracted HEVC archive, `orhsurf.fetch.convert_clip(clip_dir, out_dir, masks=..., frames="0-4")`
+can be called directly without downloading or extracting again.
 
 On a Slurm cluster read **[docs/INSTALL_SLURM.md](docs/INSTALL_SLURM.md)** first — it covers
 no-root setup, `module load`, building the CUDA extensions on a compute node, offline pre-staging,
@@ -106,7 +128,7 @@ output** — DA3 predicts jointly over the group. See INSTALL_SLURM.md §0.
 | `orhsurf run` | the whole pipeline; `--frames`, `--gpus`, `--cpus-per-job`, `--shard/--shards` for job arrays |
 | `orhsurf verify` | opens and decompresses every array, checks dtypes/shapes/lengths |
 | `orhsurf doctor` | env, allocation, CUDA extensions, weights — one report |
-| `orhsurf fetch` | DA3 weights and/or clip data |
+| `orhsurf fetch` | DA3 weights or one clip; `--convert --frames 0-4` decodes HEVC inputs |
 | `orhsurf render` | headless debug renders (PNG / mp4) from finished frames |
 | `orhsurf view` | **interactive viewer** (viser). Optional: `pip install viser` |
 
@@ -388,11 +410,11 @@ refinements rather than blockers. What is and is not proven:
 - [ ] **Everything Slurm.** No Slurm exists on the development machine. `slurm/*.sbatch` and the
       Slurm half of `docs/INSTALL_SLURM.md` are written from documented behaviour and are marked
       UNTESTED in place. Run `orhsurf doctor` inside an interactive allocation first.
-- [ ] **`install.sh` on a clean machine.** It was written against the known-good dependency set but
-      has not been run from scratch on a fresh host; the existing environments were reused for
-      testing. The CUDA extension build in particular is untested here.
-- [ ] **`orhsurf fetch --clip`.** The published dataset layout does not match the pipeline's input
-      contract (see below), so the clip fetch path cannot be exercised yet.
+- [x] Clean Python 3.10 environments and CUDA extensions installed and smoke-tested on A100.
+      `doctor --phase noweights`, CUDA matmul/backward, simple-knn, rasterizer visibility, and
+      xformers attention/backward pass. This does not substitute for full model inference.
+      DA3 retains its documented numpy<2 metadata conflict with the pinned numpy 2.2.6.
+- [x] C001 JPEG fetch and HEVC conversion are exercised on a compute node. Missing masks remain an explicit blocker; this does not establish end-to-end reconstruction.
 - [ ] Full 150-frame clip, and 8-GPU scaling (only 2 GPUs were exercised).
 - [ ] The debug video renders (`--render-orbit/--render-time/--render-both`). The always-on static
       check render is exercised; the video paths are not.
@@ -404,4 +426,4 @@ refinements rather than blockers. What is and is not proven:
       `docs/DATA_CONTRACT.md`.
 - [ ] Our own `manifest.json` carries `mask_path: None`; the masks live in a second file,
       `manifest_fg.json`. A published manifest needs them in one place.
-- [ ] Manifests store absolute paths, which do not survive a move between machines.
+- [x] Relative manifest paths resolve against the manifest directory. Obsolete absolute paths still require explicit remapping.

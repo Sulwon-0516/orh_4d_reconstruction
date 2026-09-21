@@ -43,7 +43,7 @@ import cv2
 
 # orhsurf: ROOT removed. COLMAP is located by orhsurf.paths (env ORHSURF_COLMAP_BIN, then
 # the package env, then $PATH) so nothing here is tied to the machine it was written on.
-from orhsurf.paths import colmap_bin as _colmap_bin
+from orhsurf.paths import colmap_bin as _colmap_bin, read_manifest
 COLMAP_BIN = _colmap_bin()
 CAMERA_MODEL_OPENCV = 4           # COLMAP camera model id for OPENCV
 CAMERA_MODEL_PINHOLE = 1
@@ -51,7 +51,7 @@ CAMERA_MODEL_PINHOLE = 1
 
 # ---------------------------------------------------------------- manifest ---
 def load_manifest(path):
-    man = json.load(open(path))
+    man = read_manifest(path)
     for k in ("cameras", "calibrated_serials", "conventions"):
         assert k in man, f"{path}: manifest has no '{k}'"
     c = man["conventions"]

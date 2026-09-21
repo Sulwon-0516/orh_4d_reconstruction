@@ -65,12 +65,16 @@ def fetch_clip(clip: str, data_root: Path, convert: bool = False,
     from huggingface_hub import hf_hub_download
 
     repo, rev = _repo(), _revision()
-    data_root = Path(data_root)
+    data_root = Path(data_root).expanduser().resolve()
     data_root.mkdir(parents=True, exist_ok=True)
-    dest = data_root / clip
+    # Never mix HEVC camera metadata into an existing JPEG clip directory.
+    extraction_root = data_root / "_hevc" if convert else data_root
+    extraction_root.mkdir(parents=True, exist_ok=True)
+    dest = extraction_root / clip
+    templates = ("hevc/{clip}.tar",) if convert else CLIP_ARCHIVE_TEMPLATES
 
     last_err = None
-    for tmpl in CLIP_ARCHIVE_TEMPLATES:
+    for tmpl in templates:
         rel = tmpl.format(clip=clip)
         try:
             print(f"[fetch] {repo}@{rev[:8]} :: {rel} -> {dest}")
@@ -83,7 +87,7 @@ def fetch_clip(clip: str, data_root: Path, convert: bool = False,
         import tarfile
         print(f"[fetch] extracting {tar_path}")
         with tarfile.open(tar_path) as tf:
-            tf.extractall(data_root)
+            tf.extractall(extraction_root, filter="data")
         print(f"[fetch] extracted to {dest}")
         if convert:
             return convert_clip(dest, data_root / f"{clip}_prepared", masks=masks,
@@ -92,7 +96,7 @@ def fetch_clip(clip: str, data_root: Path, convert: bool = False,
         return 0
 
     print(f"[fetch] ERROR: no archive for clip '{clip}' in {repo}@{rev[:8]}.\n"
-          f"  Tried: {[t.format(clip=clip) for t in CLIP_ARCHIVE_TEMPLATES]}\n"
+          f"  Tried: {[t.format(clip=clip) for t in templates]}\n"
           f"  Clip ids in this dataset look like C001..C100.\n"
           f"  Last error: {type(last_err).__name__}: {last_err}\n"
           f"  Override the repo with ORHSURF_CLIP_REPO / ORHSURF_CLIP_REVISION.")
@@ -114,7 +118,8 @@ def _report_missing(dest: Path, clip: str) -> None:
         for p in problems:
             print(f"  - {p}")
         print("  This is a known gap between the published dataset and the input contract.\n"
-              "  See docs/DATA_CONTRACT.md. A converter is not part of this package yet.")
+              "  HEVC conversion: orhsurf fetch --clip <id> --convert --frames 0-4.\n"
+              "  The converter does not generate masks. See docs/DATA_CONTRACT.md.")
 
 
 def convert_clip(clip_dir: Path, out_dir: Path, masks: str | None = None,
@@ -130,12 +135,13 @@ def convert_clip(clip_dir: Path, out_dir: Path, masks: str | None = None,
     import json
     from . import convert as C
 
-    clip_dir, out_dir = Path(clip_dir), Path(out_dir)
+    clip_dir, out_dir = Path(clip_dir).expanduser().resolve(), Path(out_dir).expanduser().resolve()
+    masks = str(Path(masks).expanduser().resolve()) if masks else None
     vmj = clip_dir / "video_manifest.json"
     if not vmj.exists():
         print(f"[convert] ERROR: {vmj} not found -- is {clip_dir} an extracted clip archive?")
         return 2
-    vm = json.load(open(vmj))
+    vm = json.loads(vmj.read_text())
     n = int(vm["window"]["n_timestamps"])
     serials = list(vm["valid_serials"])
     fps = n / max(float(vm["window"].get("duration_s") or 1), 1e-9)

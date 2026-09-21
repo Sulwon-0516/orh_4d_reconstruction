@@ -36,7 +36,7 @@ Three concrete consequences:
    added to the package. **This needs a decision — the package cannot invent it.**
 2. **Our own `manifest.json` carries `mask_path: None`.** On the development machine the masks are
    in a *second* manifest, `manifest_fg.json`. Any published manifest must carry `mask_path` per
-   frame, or the package must be told where masks live.
+   frame, or pass the validated RGBA mask directory via `fetch --convert --masks`.
 3. **Our manifests store absolute paths** (`/…/frames/<serial>/00040.png`). These do not survive a
    move to another machine. A published manifest must use paths relative to the clip directory, or
    the extraction step must rewrite them.
@@ -84,14 +84,14 @@ Each camera:
 | `T_world_from_camera` | 4×4 | **also required by the loader**; must be the inverse of the above |
 | `camera_center_world` | list[3] | camera centre in world coordinates |
 | `valid` | bool | false ⇒ dropped |
-| `frames` | list | per-frame entries |
+| `frames` | list or dict keyed by encoded index | per-frame entries; converted subsets use a dict |
 
-Each `frames[i]`:
+Each `frames[i]` (list) or `frames[str(i)]` (converted dict):
 
 | key | meaning |
 |---|---|
 | `index` | must equal `i` (asserted) |
-| `frame_path` | path to the RGB frame. **Consumed as given** — a relative path is NOT resolved against the manifest directory, so use absolute paths or run from the right cwd. |
+| `frame_path` | path to the RGB frame. Relative paths are resolved against the manifest directory at load time; the source manifest is preserved. Existing absolute paths are kept and must refer to this server. |
 | `mask_path` | RGBA PNG whose **ALPHA channel** is the foreground mask. Required. |
 
 ## Conventions, stated because getting them wrong fails silently

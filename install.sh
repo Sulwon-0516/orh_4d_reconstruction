@@ -38,9 +38,14 @@ PY_VERSION="${ORHSURF_PY_VERSION:-3.10}"
 ENV_AMBISUR="$HERE/env"          # torch 2.7.1+cu128, AmbiSuR + export + render
 ENV_DA3="$HERE/env-da3"          # torch 2.6.0+cu124, DA3 1008 prior ONLY
 CACHE="${ORHSURF_CACHE_DIR:-$HERE/cache}"
+mkdir -p "$CACHE"
+CACHE="$(cd "$CACHE" && pwd)"
 # Build parallelism: respect the allocation. NEVER nproc here -- inside a Slurm cgroup it reports
 # the whole node and nvcc will fork enough jobs to get the step OOM-killed.
-JOBS="${ORHSURF_BUILD_JOBS:-${SLURM_CPUS_PER_TASK:-4}}"
+JOBS="${ORHSURF_BUILD_JOBS:-${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-1}}}"
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "invalid build job count: $JOBS" >&2; exit 2; }
+ALLOC_CPUS="${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-$JOBS}}"
+if (( JOBS > ALLOC_CPUS )); then JOBS="$ALLOC_CPUS"; fi
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -53,6 +58,7 @@ echo "  cache         $CACHE"
 echo "  build jobs    $JOBS  (from ${SLURM_CPUS_PER_TASK:+SLURM_CPUS_PER_TASK}${SLURM_CPUS_PER_TASK:-default})"
 mkdir -p "$CACHE"/{hf,torch,torch_ext,triton,pip}
 export PIP_CACHE_DIR="$CACHE/pip" HF_HOME="$CACHE/hf" TORCH_HOME="$CACHE/torch"
+export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-$CACHE/conda-pkgs}"
 export MAX_JOBS="$JOBS" CMAKE_BUILD_PARALLEL_LEVEL="$JOBS"
 
 # --- environment creation ----------------------------------------------------------------
@@ -105,7 +111,7 @@ if [ "$DO_ENVS" = 1 ]; then
 import importlib, sys
 for m in ("imageio", "cv2", "scipy.spatial", "plyfile", "matplotlib",
           "utils.mono_utils", "utils.graphics_utils", "utils.general_utils",
-          "scene.cameras", "arguments"):
+          "arguments"):
     importlib.import_module(m)
 print("  [ok ] training imports resolve")
 SMOKE
@@ -174,6 +180,20 @@ if [ "$DO_EXT" = 1 ]; then
     echo "  building $ext (MAX_JOBS=$MAX_JOBS)"
     "$PA" -m pip install -q --no-build-isolation "$d"
   done
+  # Importing scene.cameras executes scene/__init__.py, which imports simple_knn.
+  # This must run AFTER the extensions exist, including on a fresh installation.
+  ( cd "$HERE/third_party/AmbiSuR" && PYTHONPATH="$HERE:$HERE/third_party/AmbiSuR" "$PA" - <<'SMOKE'
+import scene.cameras
+import gaussian_renderer
+import torch
+from simple_knn._C import distCUDA2
+points = torch.tensor([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]], device="cuda")
+dist = distCUDA2(points)
+torch.cuda.synchronize()
+assert dist.shape == (4,) and torch.isfinite(dist).all() and (dist > 0).all()
+print("  [ok ] training imports and simple_knn CUDA operation")
+SMOKE
+  )
 fi
 
 # --- weights ---------------------------------------------------------------------------------
@@ -199,6 +219,10 @@ export ORHSURF_DATA_ROOT="\${ORHSURF_DATA_ROOT:-$HERE/data}"
 export ORHSURF_OUT_ROOT="\${ORHSURF_OUT_ROOT:-$HERE/out}"
 export PYTHONPATH="$HERE:\${PYTHONPATH:-}"
 export HF_HOME="$CACHE/hf"
+export PIP_CACHE_DIR="$CACHE/pip"
+export TORCH_HOME="$CACHE/torch"
+export TORCH_EXTENSIONS_DIR="$CACHE/torch_ext"
+export TRITON_CACHE_DIR="$CACHE/triton"
 export PATH="$HERE/bin:\${PATH:-}"
 # `orhsurf` is a real executable in $HERE/bin, NOT an alias: aliases are not expanded by
 # non-interactive shells, so the documented `bash -c 'source env.sh && orhsurf ...'` and every

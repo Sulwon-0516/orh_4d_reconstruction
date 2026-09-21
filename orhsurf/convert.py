@@ -26,6 +26,7 @@ named step rather than an opaque failure.
 from __future__ import annotations
 import json, shutil, subprocess
 from pathlib import Path
+from . import cpubudget
 
 EXPECT_W, EXPECT_H = 2048, 1536
 
@@ -40,7 +41,7 @@ def _ffprobe_frames(mp4: Path, exact: bool = False) -> int:
     """
     if exact:
         out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+            ["ffprobe", "-v", "error", "-threads", str(cpubudget.resolve()), "-select_streams", "v:0", "-count_frames",
              "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(mp4)],
             capture_output=True, text=True, check=True).stdout.strip()
         return int(out)
@@ -67,9 +68,13 @@ def parse_frames(spec: str | None, n_total: int) -> list[int]:
             continue
         if "-" in part:
             a, b = part.split("-", 1)
+            if int(a) > int(b):
+                raise ValueError(f"descending frame range: {part}")
             out.update(range(int(a), int(b) + 1))
         else:
             out.add(int(part))
+    if not out:
+        raise ValueError("frame selection is empty")
     bad = [i for i in out if not 0 <= i < n_total]
     assert not bad, (f"frames {sorted(bad)[:5]} are outside this clip's 0..{n_total - 1} "
                      f"(encoded_frame_index). The clip has {n_total} frames.")
@@ -107,16 +112,21 @@ def decode_views(clip_dir: Path, out_dir: Path, serials, n_expect: int, frames=N
         tmp = d.with_name(d.name + ".part")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
-        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp4)]
+        threads = str(cpubudget.resolve())
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-threads", threads,
+               "-filter_threads", threads, "-i", str(mp4)]
         if contiguous_from_zero and len(want) < n_expect:
             # decode-order prefix: stop early rather than writing 225 frames to keep 150
             cmd += ["-frames:v", str(len(want))]
-        cmd += ["-start_number", "0", str(tmp / "%05d.png")]
+        if not contiguous_from_zero:
+            selection = "+".join(f"eq(n\\,{i})" for i in want)
+            cmd += ["-vf", f"select={selection}", "-vsync", "0", "-frames:v", str(len(want))]
+        cmd += ["-threads", threads, "-start_number", "0", str(tmp / "%05d.png")]
         subprocess.run(cmd, check=True)
         if not contiguous_from_zero:
-            for f in sorted(tmp.glob("*.png")):
-                if int(f.stem) not in set(want):
-                    f.unlink()
+            # Reverse order avoids collisions when a target is another temporary index.
+            for j, frame in reversed(list(enumerate(want))):
+                (tmp / f"{j:05d}.png").rename(tmp / f"{frame:05d}.png")
         n = len(list(tmp.glob("*.png")))
         assert n == len(want), f"{s}: ffmpeg left {n} frames, expected {len(want)}"
         shutil.rmtree(d, ignore_errors=True)
@@ -128,7 +138,9 @@ def decode_views(clip_dir: Path, out_dir: Path, serials, n_expect: int, frames=N
 def build_manifest(clip_dir: Path, rgb_root: Path, mask_root: Path | None, out_json: Path,
                    frames=None, log=print):
     """video_manifest.json -> this pipeline's manifest schema, with resolved local paths."""
-    vm = json.load(open(clip_dir / "video_manifest.json"))
+    clip_dir, rgb_root = Path(clip_dir).resolve(), Path(rgb_root).resolve()
+    mask_root = Path(mask_root).resolve() if mask_root is not None else None
+    vm = json.loads((clip_dir / "video_manifest.json").read_text())
     n = int(vm["window"]["n_timestamps"])
     valid = list(vm["valid_serials"])
     cams = {}
@@ -176,7 +188,7 @@ def build_manifest(clip_dir: Path, rgb_root: Path, mask_root: Path | None, out_j
                cameras=cams)
     Path(out_json).parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(out_json) + ".tmp")
-    json.dump(man, open(tmp, "w"), indent=1)
+    tmp.write_text(json.dumps(man, indent=1))
     tmp.rename(out_json)
-    log(f"[convert] wrote {out_json}  ({len(valid)} valid views x {n} frames)")
+    log(f"[convert] wrote {out_json}  ({len(valid)} valid views x {len(man['decoded_frames'])} frames)")
     return man, missing_masks

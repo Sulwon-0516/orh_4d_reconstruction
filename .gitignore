@@ -5,6 +5,10 @@ env.sh
 env/
 env-da3/
 cache/
+bin/
+data/
+reports/
+hf-tree.json
 # outputs
 out/
 *.npz

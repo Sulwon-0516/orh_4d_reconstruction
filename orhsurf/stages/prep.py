@@ -38,7 +38,8 @@ def cam_arrays(cam: dict):
 
 
 def frame_of(cam: dict, i: int) -> dict:
-    f = cam["frames"][i]
+    frames = cam["frames"]
+    f = frames[str(i)] if isinstance(frames, dict) else frames[i]
     assert f["index"] == i, f"frame index mismatch: entry says {f['index']}, asked for {i}"
     return f
 
