@@ -47,11 +47,19 @@ def frame_of(cam: dict, i: int) -> dict:
     the frame we asked for, under either form."""
     fr = cam["frames"]
     if isinstance(fr, dict):
-        key = str(i)
-        assert key in fr, (f"frame {i} is not in this manifest. Frames present: "
-                           f"{sorted(int(k) for k in fr)[:8]}... "
-                           f"(a converted clip only carries the frames that were decoded)")
-        f = fr[key]
+        # JSON gives string keys; a hand-written manifest may use ints. Accept both, and build the
+        # "frames present" list without int() -- a non-numeric key used to make the DIAGNOSTIC raise
+        # ValueError, so the error you saw was the error handler, not the error.
+        if str(i) in fr:
+            f = fr[str(i)]
+        elif i in fr:
+            f = fr[i]
+        else:
+            keys = sorted(fr, key=lambda k: (not str(k).lstrip("-").isdigit(), str(k)))
+            shown = ", ".join(str(k) for k in keys[:12]) + (", ..." if len(keys) > 12 else "")
+            raise AssertionError(
+                f"frame {i} is not in this manifest. Frames present: [{shown}] "
+                f"(a converted clip only carries the frames that were decoded)")
     else:
         assert 0 <= i < len(fr), (f"frame {i} out of range; this manifest carries {len(fr)} frames")
         f = fr[i]
