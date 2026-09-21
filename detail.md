@@ -22,8 +22,11 @@ but this does not mean `pip check` is clean.
 Measured frame-0 stage seconds: prep 3.03, dataset build 31.80, scene build 14.86,
 DA3 147.75, rewarp 14.06, training 517.18, export 125.28. End-to-end: approximately 14.3 minutes.
 DA3 used 1008 px, groups of 18 with overlap 6, four groups, peak 24,745 MiB allocated.
-This all-foreground-mask case exceeds a nominal 24 GB card; the earlier 23,353 MiB result
-below belongs to another run. Prefer a 40 GB or larger GPU for this default workflow.
+This A100 allocated-memory peak exceeds 24 GiB; the earlier 23,353 MiB result below belongs to
+a successful RTX 4090 run. This is not evidence of a new 40 GB algorithmic minimum or a direct
+RTX 3090 test. The runtime guard remains 23,450 MiB free and uses expandable allocator segments.
+The cause of the difference is unresolved; mask/group ordering, input shape and backend differences
+must be compared rather than assuming a cause. 40 GB+ is only a headroom recommendation.
 
 ## Installation and paths
 

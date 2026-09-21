@@ -45,8 +45,11 @@ Environment creation, wheel downloads and extension builds can take substantial 
 ## Memory and threads
 
 C001 with default all-foreground masks, DA3 1008 and groups of 18 peaked at **24,745 MiB**.
-Use **40 GB+ VRAM**; 80 GB A100 is tested. Earlier 23,353 MiB measurements used another setup
-and do not guarantee 24 GB compatibility. The free-VRAM guard does not predict every input's peak.
+This is an A100 measurement, not a newly imposed 40 GB minimum. Earlier RTX 4090 runs recorded
+23,353 MiB allocated and succeeded with the expandable allocator. The free-memory guard remains
+23,450 MiB. Current C001/RTX 3090 compatibility is **unverified**; memory can differ across inputs
+and backends, and the cause of the measured increase is not established. 40 GB+ provides headroom;
+it is not required by a new code check.
 Reducing group size changes the depth prior and has not been established as equivalent output.
 
 `--cpus-per-job N` is a program thread limit, not a Slurm allocation request. If running other
@@ -69,6 +72,10 @@ changes into the checkout. Submit with your site's verified partition/account/ti
 one GPU. `slurm/recon_array.sbatch` and `slurm/recon_singlenode.sbatch` contain explicit multi-GPU,
 CPU, memory, partition and module assumptions; they are examples, not the tested quick-start.
 Create their `slurm_logs` directory before submission if using those templates.
+For one different clip per array task, use `slurm/process_clips.sbatch` as shown in README.
+That script has no CPU/memory, module or project defaults; it uses `MODEL_OUTPUT_DIR` as its output
+root when set. This cluster enforces WCKey and MODEL_OUTPUT_DIR at submission; supply actual
+approved values. `--test-only` does not create a job but still checks those site requirements.
 
 ## Paths and shared storage
 

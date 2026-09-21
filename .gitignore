@@ -16,3 +16,6 @@ out/
 *.mp4
 __pycache__/
 *.pyc
+
+# Slurm clip-array logs in the submission directory
+/slurm-process-*.out

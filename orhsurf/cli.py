@@ -529,6 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
     whole.add_argument("--gpus", type=int, default=1, help="GPUs on this node; parallel frames within each clip, sequential clips")
     whole.add_argument("--out-root", default=None, help="results under <root>/<clip>/<frame>; default out/")
     whole.add_argument("--cpus-per-job", type=int, default=None, help="thread limit within the existing allocation")
+    whole.add_argument("--smoke", action="store_true", help="frame 0 only at full quality; isolated inputs and out/_smoke/<clip>")
     whole.set_defaults(fn=process_clips)
 
     r = sub.add_parser("run", help="reconstruct a clip end to end (prep -> DA3 -> train -> export)")

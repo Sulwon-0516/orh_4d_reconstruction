@@ -14,7 +14,7 @@ C001 means all 225 frames, not a five-frame test. Results go to `out/C001/00000/
 The command stops on a failed stage. Re-run it to resume completed matching frames.
 
 **First-time setup:** `orhsurf` is this repository's CLI. The installer creates `bin/orhsurf`;
-`source env.sh` makes it available in the current shell. Use a **40 GB+ GPU** (A100 80 GB tested),
+`source env.sh` makes it available in the current shell. Use a CUDA GPU (A100 80 GB tested; **24 GB compatibility is configuration-dependent**),
 conda/mamba, CUDA Toolkit and a supported compiler. Run setup on a compute node.
 
 ```bash
@@ -39,6 +39,41 @@ cannot finish it. Use a permitted longer allocation or resume manually later. Do
 network unless inputs and weights are already present. Clip preparation happens one clip at a
 time, not by pre-downloading the entire list. No CPU/memory resource request is invented.
 
+### Separate clips as separate Slurm jobs
+
+Submit from the installed checkout, adding your site's required account/project options:
+
+```bash
+sbatch --array=0-3%2 slurm/process_clips.sbatch C001 C002 C003 C004
+```
+
+Array tasks 0/1/2/3 handle C001/C002/C003/C004 respectively; `%2` allows at most two clips
+concurrently. Each task gets one GPU by default and performs preparation, full reconstruction
+and verification. Set an approved partition and wall time via sbatch options. Different tasks
+can run on different nodes. Unlike `process --clips ...` in one shell, these clips are independent.
+To use two GPUs **per clip**, specify both `sbatch --gres=gpu:2` and script argument `--gpus 2`.
+
+Optional first-frame smoke run (same quality, separate inputs and outputs):
+
+```bash
+sbatch --partition=debug --time=00:30:00 --array=0-1%1 \
+  slurm/process_clips.sbatch --smoke C001 C002
+```
+
+`--smoke` runs frame 0 at the unchanged 7,000-iteration/DA3-1008 recipe and verifies it; allow
+roughly 14 minutes plus input setup per clip based on the A100 measurement. Outputs go to
+`out/_smoke/<clip>/00000/`; full runs use `out/<clip>/`. When `MODEL_OUTPUT_DIR` is exported,
+the script uses that directory instead of `out/`. Logs are `slurm-process-<job>_<task>.out`.
+The array range must match the list; to retry selected indices, preserve the **original clip list**.
+
+On the tested cluster, sbatch additionally requires an approved `--account`,
+`--wckey=project-short-name:...` and `MODEL_OUTPUT_DIR`. Set your actual project values;
+the script does not invent them. Add `--test-only` before the script name to validate submission
+without creating jobs. Local array mapping/smoke isolation tests passed; the scheduler check
+currently awaits the project's approved `MODEL_OUTPUT_DIR`, so actual array execution is not
+claimed as validated. Existing `slurm/recon_array.sbatch` partitions frames of **one** clip;
+this new script partitions **different clips**.
+
 ### More GPUs on one node
 
 After obtaining an allocation with four GPUs visible to the same process:
@@ -56,7 +91,7 @@ Completed matching frames can be resumed with a different GPU count.
 or span multiple nodes. If fewer GPUs are visible, `process` stops before downloads. CPU threads
 default to allocated CPUs divided by the requested GPU count: 20 CPUs / 4 GPUs → 5 threads each.
 Explicit `--cpus-per-job` or `ORHSURF_CPUS_PER_JOB` overrides are **per worker**; their total must
-fit the allocation or the command stops. Each GPU still needs its own VRAM (40 GB+ recommended).
+fit the allocation or the command stops. Each GPU needs its own VRAM; memory is not pooled across GPUs.
 Host RAM and concurrent scratch requirements grow with the number of workers; plan roughly
 6 GB scratch per worker based on historical measurements. Busy GPUs may be skipped by the
 runtime VRAM check. Speedup is not guaranteed to be linear because CPU and storage are shared.
@@ -261,9 +296,13 @@ Allow roughly **230 GB plus headroom** for the full workflow using these estimat
 Optional PLY adds substantial storage; leave it off unless needed. GB here is decimal.
 Conversion/download time is additional and depends on CPU, network and shared storage.
 
-DA3 peaked at **24,745 MiB** in this run; a nominal 24 GB card is insufficient for this observed
-case. **40 GB+ is recommended**, A100 80 GB is tested. The runtime's free-memory guard is only
-a preliminary check, not a guarantee. Host-memory peak has not been measured in this run.
+DA3 peaked at **24,745 MiB torch-allocated on A100** in this run. Earlier RTX 4090 runs recorded
+23,353 MiB allocated / 24,090 MiB device usage, so **40 GB is not a code-enforced minimum**.
+The current preflight guard checks for 23,450 MiB free; expandable allocator segments remain
+enabled. 24 GB cards can be tight, and this exact C001 workflow has not been tested on RTX 3090.
+An A100 measurement alone does not establish the peak on another GPU/backend. A 40 GB+ card
+provides headroom, not a new algorithmic requirement. The cause of the difference from the earlier
+measurement is unresolved. Host-memory peak has not been measured in this run.
 Inspect quota using site-approved tools; avoid recursive shared-storage scans or continuous polling.
 
 <details>
