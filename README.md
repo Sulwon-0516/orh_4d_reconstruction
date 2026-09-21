@@ -482,6 +482,11 @@ orhsurf process --clips C001 --preset balanced --gpus 8
 | `balanced` | 3000 | 500/100 | 728,730 | 9.38 | 343 s |
 | **`economy`** (batch default) | 2000 | 500/**80** | 676,926 | 9.07 | **261 s** |
 | `draft` | 1000 | 500/100 | 148,377 | 7.90 | 198 s |
+| `fast` | 2000 @ **`-r 4`** | 500/80 | 615,437 | 7.50 | **151 s** |
+
+`fast` is the only preset that changes the **raster**, and it is the only one whose isolation
+threshold moves with it: it sets `--resolution 4` **and** `--nn-max-mm 10`. Do not set one without
+the other — see below.
 
 `support` is the mean number of cameras whose rendered depth agrees within `--consistency-mm`. It
 is the pipeline's own quality signal and it is a **proxy**, so these were also compared in 3D
@@ -489,6 +494,36 @@ before being written down. They have **not** been re-checked across frames or cl
 
 An explicit flag overrides the preset, so `--preset economy --iterations 2500` is legal;
 `--densify-from-iter` and `--densification-interval` are exposed for the same reason.
+
+### `fast`: a quarter of the points, and why the threshold has to move with the raster
+
+A point is one **pixel** of one camera's rendered depth, so `-r 4` produces a cloud roughly 4x
+sparser — **6.5 M points instead of 24-25 M** — and the k=5 nearest-neighbour distance roughly
+doubles: measured **median 2.42 mm at `-r 2` against 4.985 mm at `-r 4`**. Leaving `--nn-max-mm` at
+5.0 there puts the threshold on top of the median, and the export refuses outright:
+
+```
+AssertionError: the isolation gate would drop 51.2% of the cloud; nn-k=5 nn-max-mm=5.0
+is wrong for this point density (k=5 distance median 4.985 mm)
+```
+
+**The two signals disagree here, and the disagreement is left visible on purpose.** By `support`
+alone, `-r 4` with a 5 mm threshold scores *higher* than with 10 mm:
+
+| `-r 4`, 3000 it | points | dropped as isolated | support |
+|---|---|---|---|
+| `--nn-max-mm 5` | 4,340,511 | 2,582,417 | **9.39** |
+| `--nn-max-mm 10` | 6,636,905 | 286,023 | 7.70 |
+
+So the 2.58 M points that 5 mm removes really are the poorer ones — that is not an artefact.
+`fast` uses 10 mm anyway, because the clouds were compared in 3D and 10 mm was judged the better
+surface. `support` is a proxy and the 3D reading decides; both numbers are here so a later reader
+can revisit the call rather than inherit it.
+
+Speed, for the same models, `-r 4`: 2000 iterations trains in 105 s, 3000 in 187 s, and export is
+~45 s either way (export scales with points, not with training length). So `fast` at 151 s is
+**4.6x** faster end-to-end than `quality` at 692 s — for a quarter of the points and support 7.50
+against 10.21.
 
 **What the speedup actually is.** `economy` is **2.65x** faster than `quality` on the part it
 changes (training + export, 692 s -> 261 s). End to end it is less, because the DA3 prior and the

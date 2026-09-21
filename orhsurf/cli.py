@@ -550,7 +550,8 @@ def build_parser() -> argparse.ArgumentParser:
     whole.add_argument("--gpus", type=int, default=1, help="GPUs on this node; parallel frames within each clip, sequential clips")
     whole.add_argument("--preset", default="economy",
                        help="speed/quality point (default: economy). quality 7000 it | balanced "
-                            "3000 | economy 2000 + 500/80 densify | draft 1000. See README.")
+                            "3000 | economy 2000 + 500/80 densify | draft 1000 | fast (-r 4, "
+                            "quarter the points, 10 mm isolation). See README.")
     whole.add_argument("--iterations", type=int, default=None, help="overrides --preset")
     whole.add_argument("--resolution", type=int, default=None, help="AmbiSuR -r; overrides --preset")
     whole.add_argument("--densify-from-iter", type=int, default=None, dest="densify_from_iter")
@@ -589,10 +590,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--shards", type=int, default=None,
                    help="total number of array tasks. Defaults to SLURM_ARRAY_TASK_COUNT.")
     r.add_argument("--preset", default=None,
-                   help="speed/quality point: quality (7000 it, best support 10.21, 692 s/frame) | "
-                        "balanced (3000, 9.38, 343 s) | economy (2000 + denser schedule, 9.07, "
-                        "261 s) | draft (1000, 7.90, 198 s). Measured on one frame; explicit "
-                        "--iterations / --densify-* override it.")
+                   help="speed/quality point: quality (7000 it, support 10.21, 692 s/frame) | balanced "
+                        "(3000, 9.38, 343 s) | economy (2000 + 500/80 densify, 9.07, 261 s) | "
+                        "draft (1000, 7.90, 198 s) | fast (-r 4 + 2000 it + 10 mm isolation, 151 s, "
+                        "but ~6.5 M points instead of ~25 M). Measured on one frame; an explicit "
+                        "--iterations / --resolution / --nn-max-mm / --densify-* overrides it.")
     r.add_argument("--iterations", type=int, default=None, help="overrides --preset")
     r.add_argument("--densify-from-iter", type=int, default=None, dest="densify_from_iter")
     r.add_argument("--densification-interval", type=int, default=None,
