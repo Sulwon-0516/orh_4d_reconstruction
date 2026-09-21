@@ -29,7 +29,7 @@
                                      #            e.g. --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8            # <<< CHECK  8 is what one job actually uses (~280% CPU)
 #SBATCH --mem=64G                    # <<< CHECK  export peaks ~35 GB RSS on a 47-camera clip
-#SBATCH --time=24:00:00              # <<< CHECK  ~11 min/frame at 7k; 150 frames / 8 tasks ~ 3.5 h
+#SBATCH --time=24:00:00              # <<< CHECK  11-19 min/frame (concurrency-dependent); budget ~6 h for 150 frames / 8 tasks
 #SBATCH --partition=gpu              # <<< CHECK  your GPU partition name
 
 set -euo pipefail

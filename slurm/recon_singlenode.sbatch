@@ -18,7 +18,7 @@
 #SBATCH --gres=gpu:8                 # <<< CHECK  match [NGPUS] below and your node's GPU count
 #SBATCH --cpus-per-task=64           # <<< CHECK  8 per GPU; orhsurf caps each worker at 8 anyway
 #SBATCH --mem=256G                   # <<< CHECK  ~35 GB per concurrent worker at export
-#SBATCH --time=24:00:00              # <<< CHECK  ~11 min/frame; 150 frames / 8 GPUs ~ 3.5 h
+#SBATCH --time=24:00:00              # <<< CHECK  11-19 min/frame; budget ~6 h for 150 frames / 8 GPUs
 #SBATCH --partition=gpu              # <<< CHECK
 
 set -euo pipefail

@@ -248,7 +248,11 @@ sbatch slurm/recon_singlenode.sbatch C001 0-149 8
 both times (451 s solo vs 1705 s each at 7k), and the DA3 stage OOMs at two per GPU regardless of
 `-r`.
 
-Timing: ~11 min/frame at `-r 2` × 7k iterations. 150 frames ÷ 8 tasks ≈ **3.5 h**.
+Timing: **11–19 min/frame**, depending on concurrency. One frame alone measured 11.1 min; two
+frames on two GPUs measured ~19 min *each*, twice — a ~1.7× penalty at only 2-way concurrency. The
+8-way figure is **UNMEASURED** (the one 8-GPU run was CPU-starved). 150 frames ÷ 8 tasks is ~3.5 h
+only if frames were independent, which they are not — **budget ~6 h**. Full numbers and their
+conditions are in the README's *Capacity planning* section.
 
 ---
 
@@ -257,7 +261,7 @@ Timing: ~11 min/frame at `-r 2` × 7k iterations. 150 frames ÷ 8 tasks ≈ **3.
 ```bash
 source env.sh
 orhsurf doctor                                    # every component, one report
-orhsurf run --clip C001 --frames 0-0 --gpus 1     # ONE frame, end to end (~11 min)
+orhsurf run --clip C001 --frames 0-0 --gpus 1     # ONE frame, end to end (11-19 min)
 orhsurf verify --clip C001                        # opens every array
 ```
 

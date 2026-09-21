@@ -466,6 +466,26 @@ def cmd_fetch(a) -> int:
     return rc
 
 
+def cmd_view(a) -> int:
+    """Open one finished frame in viser. Optional dependency; see orhsurf/viewer.py."""
+    from . import viewer
+    if a.npz:
+        npz = Path(a.npz)
+        if not npz.is_file():
+            raise SystemExit(f"no such file: {npz}")
+        manifest = Path(a.manifest) if a.manifest else None
+    else:
+        if not a.clip:
+            raise SystemExit("give --clip (a clip id / dir / manifest.json) or --npz <path>")
+        manifest = Path(a.manifest) if a.manifest else resolve_clip(a.clip)
+        p = Path(a.clip)
+        clip_id = p.parent.name if p.suffix == ".json" else (p.name if p.exists() else a.clip)
+        npz = viewer.find_frame(Path(a.out).resolve() if a.out
+                                else (paths.out_root() / clip_id).resolve(), a.frame)
+    return viewer.serve(npz, manifest, port=a.port, host=a.host,
+                        point_size=a.point_size, budget=a.budget)
+
+
 def cmd_render(a) -> int:
     from .render import debug_renders, static_check_render
     root = Path(a.out or (paths.out_root() / a.clip)).resolve()
@@ -562,6 +582,25 @@ def build_parser() -> argparse.ArgumentParser:
     rr.add_argument("--time", action="store_true")
     rr.add_argument("--both", action="store_true")
     rr.set_defaults(fn=cmd_render)
+
+    v = sub.add_parser("view", help="open a finished frame in an interactive viser viewer")
+    v.add_argument("--clip", default=None,
+                   help="clip id, clip dir, or path to manifest.json (same forms as `run`)")
+    v.add_argument("--frame", type=int, default=None,
+                   help="frame index; default = the first COMPLETED frame")
+    v.add_argument("--npz", default=None, help="a surface.npz directly, instead of --clip")
+    v.add_argument("--manifest", default=None,
+                   help="manifest for camera centres (enables the `facing` mode); "
+                        "inferred from --clip when possible")
+    v.add_argument("--out", default=None, help="output root, if not the default")
+    v.add_argument("--port", type=int, default=8080)
+    v.add_argument("--host", default="0.0.0.0",
+                   help="0.0.0.0 so a cluster node is reachable through an SSH tunnel")
+    v.add_argument("--point-size", type=float, default=0.004, dest="point_size")
+    v.add_argument("--budget", default="3 M", choices=list(__import__(
+        "orhsurf.viewer", fromlist=["BUDGETS"]).BUDGETS),
+                   help="how many points to stream to the browser")
+    v.set_defaults(fn=cmd_view)
     return p
 
 

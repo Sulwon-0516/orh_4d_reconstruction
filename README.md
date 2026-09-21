@@ -70,7 +70,7 @@ source env.sh
 
 orhsurf doctor                   # check everything at once
 orhsurf fetch --clip C001        # downloads + extracts the clip archive -- but see the warning below
-orhsurf run --clip C001 --gpus 1 --frames 0-0     # smoke test: one frame, ~11 min
+orhsurf run --clip C001 --gpus 1 --frames 0-0     # smoke test: one frame, 11-19 min
 orhsurf verify --clip C001       # open every output and check it
 
 > **`fetch --clip` does not yet give you a runnable clip.** It downloads and extracts the published
@@ -94,7 +94,7 @@ from documented behaviour, not verified on a real cluster.
 | **GPU** | **≥ 24 GB.** Set by the DA3 stage (peaks **23,353 MiB** torch-allocated, measured), not by training. The margin on a 24 GB card is ~3%, so another user's process on the same GPU will OOM it; `run` checks free VRAM before dispatching. |
 | CPU | 8 cores per concurrent job is enough (one job uses ~280%) |
 | Disk | ~620 MB per frame (~93 GB per 150-frame clip), plus ~6 GB transient scratch per frame |
-| Time | ~11 min/frame at `-r 2` × 7k. A 225-frame published clip on 8 GPUs ≈ 5 h |
+| Time | 11–19 min/frame at `-r 2` × 7k, depending on concurrency. See **Capacity planning** — do not size a job from the 11 min figure alone. |
 
 A 16 GB GPU does not fit at the default `--group-size 18`. Lowering it works but **changes the
 output** — DA3 predicts jointly over the group. See INSTALL_SLURM.md §0.
@@ -107,7 +107,8 @@ output** — DA3 predicts jointly over the group. See INSTALL_SLURM.md §0.
 | `orhsurf verify` | opens and decompresses every array, checks dtypes/shapes/lengths |
 | `orhsurf doctor` | env, allocation, CUDA extensions, weights — one report |
 | `orhsurf fetch` | DA3 weights and/or clip data |
-| `orhsurf render` | debug renders from finished frames |
+| `orhsurf render` | headless debug renders (PNG / mp4) from finished frames |
+| `orhsurf view` | **interactive viewer** (viser). Optional: `pip install viser` |
 
 Staged subcommands exist for debugging, but `run` is the path.
 
@@ -171,6 +172,31 @@ The failure this defends against is real: the source project holds two truncated
 check passes and the failure only appears as `BadZipFile` inside a render, hours later. One of them
 is *newer* than its own sidecar files — a re-run overwrote a good output and then died.
 
+## Interactive viewer
+
+```bash
+pip install viser                      # optional extra; install.sh does not add it
+orhsurf view --clip C001               # defaults to the first COMPLETED frame
+orhsurf view --npz <path>/surface.npz --manifest <path>/manifest.json
+```
+
+Colour modes **rgb / shaded / normal / facing / support**, a points-drawn budget (a 25 M-point
+cloud will not stream at full density), and a **`support >=` slider** that re-filters at read time
+without re-exporting.
+
+**`facing` is the one that earns its place.** Green where a normal points at the nearest camera,
+red where it points away. `shaded` uses `|n·L|` and is blind to normal sign *by construction* —
+which is precisely why this project's always-on sanity render could not see that every exported
+normal was back-facing. **~25% red is expected** ("nearest" is a proxy for "producing" camera); a
+**mostly red** cloud means the sign bug is back.
+
+It binds `0.0.0.0`, so on a cluster forward the port — a compute node is not reachable directly:
+
+```bash
+ssh -L 8080:<compute-node>:8080 <user>@<login-node>
+# then open http://localhost:8080
+```
+
 ## Debug renders
 
 Headless, offline, ffmpeg-based — no viser, no display. House convention: **shading → normal →
@@ -180,6 +206,127 @@ rgb**.
   viewpoints 50° apart. Two, because a single view hides error along its own optical axis entirely.
 - **Opt-in, individually flagged:** `--render-orbit` (static frame, moving camera), `--render-time`
   (all frames, static camera), `--render-both`.
+
+## Output format
+
+One directory per frame:
+
+```
+<out>/<clip-id>/<frame:05d>/
+    surface.npz           the product
+    surface_export.json   point counts + every filter parameter actually used
+    provenance.json       full recipe, stage timings, CPU budget, DA3 revision
+    metadata.json         timestamp, method, source manifest
+    _DONE.json            written LAST, after every payload is fsynced
+    surface.ply           only with --write-ply
+```
+
+**What a reader should check, in order:**
+1. `_DONE.json` — **its absence means the frame is not finished.** It records every file's size, so
+   a truncated payload is caught without decompressing anything. Never infer completion from
+   `surface.npz` existing.
+2. `surface_export.json` — `n_points` should equal the NPZ's array length (`orhsurf verify` checks
+   this), and the filter parameters record what was actually applied rather than what a default
+   would have given.
+3. `provenance.json` — the recipe hash, per-stage wall times, the CPU budget that applied, and the
+   pinned DA3 revision.
+
+### `surface.npz` schema
+
+| array | dtype | shape | units / range | meaning |
+|---|---|---|---|---|
+| `xyz` | float32 | (N,3) | world metres | point position, manifest world frame |
+| `normal` | float32 | (N,3) | unit vector | surface normal, **flipped to face the producing camera** |
+| `rgb` | uint8 | (N,3) | 0–255 | the ground-truth photo's colour, not the model's |
+| `confidence` | float32 | (N,) | 0–1 | `clip((support - min_views) / 6, 0, 1)` |
+| `observed` | bool | (N,) | — | currently **all True**; reserved |
+| `support` | int16 | (N,) | 1..n_cameras | how many cameras' rendered depth agreed within `--consistency-mm` |
+
+**`support` is the post-hoc filter handle, and it is the most useful field after `xyz`.** A stricter
+`support >= k` can be applied at read time without re-exporting and without retraining — that is
+how the filter variants in this project were compared. `orhsurf view` exposes it as a slider.
+
+`surface.ply` is a **strict subset**: `xyz`, `normal`, `rgb` only — no `confidence`, `observed` or
+`support`, so it cannot be re-filtered. Nothing in the pipeline reads it back; it exists for
+MeshLab. It is off by default because it is expensive (see below).
+
+## Capacity planning
+
+Size a Slurm allocation from this table rather than from prose. Every figure is measured; the
+conditions are given because some of them disagree.
+
+| | per frame | per 150-frame clip |
+|---|---|---|
+| output (`surface.npz`) | ~620 MB | **~93 GB** |
+| + PLY (`--write-ply`) | ~1.3 GB | **~198 GB** |
+| transient scratch | ~6 GB (peak, one frame at a time) | — |
+| wall time, 1 GPU | **11–19 min** — see the note | — |
+| wall time, 8 GPUs | **unmeasured** | ~3.5 h *if* frames were independent; they are not |
+
+Plus a **one-off ~32 GB install**: `env` 8.7 GB + `env-da3` 7.3 GB + DA3 checkpoint 6.76 GB + HF
+cache 9.7 GB (measured on a clean machine).
+
+`surface.npz` measured at 616,913,984 B and 617,142,152 B for N ≈ 25.4 M points.
+
+### Wall time — two numbers that do not agree
+
+Per-stage, frame 00040, one RTX 4090, 8 cores, `-r 2` × 7k:
+
+```
+prep 2 s · dataset_build 35 s · scene_build 16 s · da3_1008 88 s · rewarp 19 s
+train 706 s · export 296 s                    = 1,162 s = 19.4 min
+```
+
+End-to-end:
+
+| run | measured |
+|---|---|
+| 1 frame, 1 GPU | **11.1 min** |
+| 2 frames, 2 GPUs | **19.5 min** and **19.1 min** (two independent runs) |
+| 8 frames, 8 GPUs | 74.1 min — **invalid**, that run was CPU-capped to 8 cores *total* |
+
+**The stage sum (19.4 min) and the single-frame end-to-end (11.1 min) do not agree, and we do not
+know why** — the load each was taken under was not recorded. Both are reported rather than
+averaged. Do not size a job from 11 min alone.
+
+**Per-frame time is not independent of concurrency.** One frame alone is 11.1 min; two frames on
+two GPUs take ~19 min *each*, measured twice. That is a **~1.7× slowdown at only 2-way
+concurrency**, and it is the number that matters for `--time`. The 8-GPU figure is genuinely
+unmeasured: the only 8-way run was CPU-starved and proves nothing about throughput. So:
+
+- optimistic (frames independent): 150 frames ÷ 8 GPUs × 11.1 min ≈ **3.5 h**
+- with the measured 2-way penalty applied: 150 ÷ 8 × 19 min ≈ **5.9 h**
+
+Request time against the second, and note that 8-way contention may be worse than 2-way.
+
+**`export` roughly doubled — 296 s → 781 s on frame 40 — after the durability change**, because
+every ~620 MB payload is now fsynced before the completion marker. That is the cost of the
+guarantee actually holding. The 19.4 min stage sum above is **pre-fsync**; a post-fsync frame is
+roughly 8 min longer.
+
+### Disk warnings, learned the hard way
+
+- **`--write-ply` nearly doubles a clip to ~198 GB.** On the development box accumulated PLYs
+  reached ~110 GB and filled the filesystem to **99.9%, 0 bytes available**. Throughput collapsed
+  to a few MB/min, `rm` took ~18 s *per file*, and five processes wedged in uninterruptible `D`
+  state. On a shared cluster scratch this affects other people. **Check your quota before
+  launching a full clip**, and leave PLY off unless you need it.
+- **Scratch is kept on failure, by design** — it holds the trained model and DA3 depths, ~13 min of
+  GPU work. A run with many failures therefore accumulates **~6 GB per failed frame**. Clean up
+  `<out>/_work/` after a bad run.
+
+### Point counts are not reproducible to the digit
+
+Three independent runs of frame 40, identical code and inputs:
+
+```
+25,493,841   25,426,861   25,366,727      -> 0.50% spread
+```
+
+while the **pre-filter** cloud reproduced to ~1e-5. **The cause is not established.** Each of the
+three runs trained separately, so the filter never saw the same input twice — nothing in that data
+separates AmbiSuR's training variance from sensitivity in the filter itself. Treat a sub-percent
+difference between two runs as expected, and do not compare point counts to the digit.
 
 ## Input data
 
