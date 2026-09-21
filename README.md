@@ -52,7 +52,10 @@ and **+2.33%** — a different frame, so they are not expected to match exactly.
 
 ## Quick start
 
-**Prerequisite:** `micromamba`, `mamba` or `conda` on `$PATH`. `install.sh` needs it for a pinned
+**Prerequisites:** `micromamba`, `mamba` or `conda` on `$PATH`, and a network that can reach
+`download.pytorch.org` over **IPv4 or IPv6**. Its CDN resolves IPv6-only on some networks, and an
+IPv4-only host then fails the torch install with a confusing name-resolution error — see
+[docs/INSTALL_SLURM.md](docs/INSTALL_SLURM.md#if-the-torch-download-fails-with-a-dns-error). `install.sh` needs it for a pinned
 Python 3.10 *and* for COLMAP (conda-forge ships it; PyPI does not). No root required:
 
 ```bash

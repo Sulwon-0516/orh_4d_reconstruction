@@ -107,6 +107,29 @@ export CC=$(which gcc) CXX=$(which g++)
 
 Build parallelism comes from `SLURM_CPUS_PER_TASK`, never `nproc` — see §5.
 
+### If the torch download fails with a DNS error
+
+```
+Failed to resolve IP address for 'download-r2.pytorch.org'
+([Errno -3] Temporary failure in name resolution)
+```
+
+**Observed on the development host.** `download.pytorch.org` redirects to a Cloudflare CDN that, on
+some networks, resolves to **IPv6 addresses only**. A host without a working IPv6 route then fails
+at name resolution, and pip reports it as if the host did not exist. Check with:
+
+```bash
+getent hosts download-r2.pytorch.org     # only 2xxx:... lines => IPv6-only here
+curl -4 -sI https://download.pytorch.org/whl/cu128/ | head -1   # does IPv4 work at all?
+```
+
+Workarounds, in order of preference:
+1. Enable IPv6 on the host, or use a site mirror / proxy that serves IPv4.
+2. Pre-download the wheels on a machine that can reach the CDN and install from a local directory:
+   `pip install --no-index --find-links /path/to/wheels torch==2.7.1+cu128 ...`
+3. Use your site's own torch build if it matches (`2.7.1+cu128` for the AmbiSuR env, `2.6.0+cu124`
+   for the DA3 env) — but see the two-environment note above: the DA3 stage is pinned for a reason.
+
 Symptom → cause:
 
 | Symptom | Cause |
