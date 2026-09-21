@@ -8,6 +8,46 @@ Each clip defaults to **the first 150 frames (0–149)**: **10 seconds at 15 fps
 150 fps. Every selected frame uses the unchanged reconstruction recipe. The workflow downloads
 inputs as needed, prepares them, reconstructs them, and verifies all expected outputs.
 
+### Arguments — choose these before running
+
+| Argument / setting | Meaning and default |
+|---|---|
+| `--gpus 8` | GPUs used **per clip on one node**; default `1`. For sbatch, also request `--gres=gpu:8`. |
+| `--durations 10` / `15` / `10,15` | Save a 10-second version, a 15-second version, or both at 15 fps. Explicit durations use separate `10s/` and `15s/` output roots. Without this argument: first 150 frames directly under the output root. |
+| `--simplify` | Add **1M and 5M** point clouds for every frame; **keep originals**. Random subsampling is the default. |
+| `--simplify-only` | Save and verify **1M and 5M**, then **delete original cloud payloads**. Works alone; no `--simplify` argument is required. |
+| `--simplify 5M --simplify-only` | Override the point budgets: retain only 5M. Comma-separated budgets also work, e.g. `--simplify 1M,5M`. |
+| `--simplify-method random` | Default sampling method. Alternatives: `stratified` or `normal-voxel`. Requires `--simplify` or `--simplify-only` to produce derivatives. |
+| `--cleanup-decoded` | After successful clip verification, delete generated RGB and automatic-mask PNGs. Preserve source videos, calibration, manifests and supplied masks. Default: keep decoded inputs. |
+| `--smoke` | Test only frame 0 with unchanged reconstruction quality, under separate `_smoke/` outputs. |
+| `--all-frames` | Process every encoded frame; cannot be combined with `--durations`. |
+| `--array=0-99%10` | **sbatch option**: 100 clip tasks, at most 10 running concurrently. Match the index range to the number of clip IDs. |
+| `MODEL_OUTPUT_DIR` | Export the approved output root for sbatch. For direct `orhsurf process`, use `--out-root /your/output/root` (default: `out/`). |
+
+**Argument placement matters:** Slurm options go **before** the script path; processing options
+go **after** it and **before** the clip list. In direct CLI commands, pass clips with `--clips`.
+Bash expands `C{001..100}` into C001 through C100.
+
+After completing installation and the cluster settings below, this command saves **both durations**,
+keeps only **1M + 5M**, and cleans decoded inputs, using eight GPUs per clip:
+
+```bash
+sbatch "${SBATCH_SITE[@]}" --array=0-99%10 --gres=gpu:8 slurm/process_clips.sbatch --gpus 8 --durations 10,15 --simplify-only --cleanup-decoded C{001..100}
+```
+
+Inside an existing one-GPU allocation, the equivalent processing options are:
+
+```bash
+orhsurf process --clips C001 C002 --gpus 1 --durations 10,15 --simplify-only --cleanup-decoded
+```
+
+Omit `--durations 10,15` for just the default first 150 frames. Omit `--simplify-only` to retain
+full point clouds, or replace it with `--simplify` to keep originals **and** the two reduced versions.
+Both durations currently reconstruct overlapping frames independently. Deletion happens only after
+all requested outputs for that clip/version verify; temporary original and decoded storage is still
+needed while it runs. See [storage estimates](#smaller-point-clouds--point-count-per-frame-not-fewer-frames)
+for retained and temporary capacity.
+
 ### 1. Install once in a shared checkout
 
 Run on an **allocated compute node**, using an existing allocation if available. Prerequisites:
