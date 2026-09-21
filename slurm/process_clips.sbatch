@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One clip per array task; invoke from the checkout (or set ORHSURF_REPO).
 # sbatch --array=0-3%2 [site options] slurm/process_clips.sbatch C001 C002 C003 C004
-# Add --smoke AFTER the script name for frame 0 only, with unchanged reconstruction defaults.
+# Add --smoke AFTER the script name for frame 0 only; a smoke run always uses the FULL recipe.
+# Speed/quality: --preset quality|balanced|economy|draft (default economy) after the script name,
+#   sbatch --array=0-3%2 slurm/process_clips.sbatch --preset quality C001 C002 C003 C004
 #SBATCH --job-name=orhsurf-clips
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -15,6 +17,11 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke) SMOKE+=(--smoke); shift ;;
         --all-frames|--simplify-only|--cleanup-decoded) SMOKE+=("$1"); shift ;;
+        # Speed/quality point. Default is economy (2000 it, 500/80 densify) -- see README.
+        # --smoke ignores it and runs the full recipe, so a smoke test still means something.
+        --preset|--iterations|--resolution|--densify-from-iter|--densification-interval)
+            [[ -n ${2:-} ]] || { echo "$1 needs a value" >&2; exit 2; }
+            SMOKE+=("$1" "$2"); shift 2 ;;
         --simplify)
             SMOKE+=(--simplify)
             if [[ ${2:-} =~ ^[0-9]+[mM]?(,[0-9]+[mM]?)*$ ]]; then

@@ -134,7 +134,20 @@ def run(a) -> int:
     all_frames = getattr(a, 'all_frames', False)
     if smoke:
         root = root / '_smoke'
-        print('[process] smoke: frame 0 only, original 7000-iteration recipe; separate outputs', flush=True)
+        # A smoke run exists to prove the install and the data, so it uses the FULL recipe even
+        # when the batch default is economy -- otherwise "the smoke test passed" would say nothing
+        # about a quality run. An explicit --preset/--iterations still wins.
+        if getattr(a, 'preset', None) in (None, 'economy') and getattr(a, 'iterations', None) is None:
+            a.preset = 'quality'
+        r = cli.recipe_from_args(a)
+        print(f'[process] smoke: frame 0 only, preset {getattr(a, "preset", "quality")} '
+              f'({r.iterations} it, densify {r.densify_from_iter}/{r.densification_interval}); '
+              f'separate outputs', flush=True)
+    else:
+        r = cli.recipe_from_args(a)
+        print(f'[process] preset {getattr(a, "preset", None) or "quality"}: {r.iterations} it, '
+              f'-r {r.resolution}, densify {r.densify_from_iter}/{r.densification_interval}',
+              flush=True)
     for i, clip in enumerate(a.clips, 1):
         print(f'[process] {i}/{len(a.clips)}: {clip}', flush=True)
         out = root/clip

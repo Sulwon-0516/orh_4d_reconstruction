@@ -548,6 +548,14 @@ def build_parser() -> argparse.ArgumentParser:
     whole = sub.add_parser("process", help="download, prepare, reconstruct and verify clips sequentially (first 150 frames by default)")
     whole.add_argument("--clips", nargs="+", required=True, help="clip IDs in execution order, e.g. C001 C002")
     whole.add_argument("--gpus", type=int, default=1, help="GPUs on this node; parallel frames within each clip, sequential clips")
+    whole.add_argument("--preset", default="economy",
+                       help="speed/quality point (default: economy). quality 7000 it | balanced "
+                            "3000 | economy 2000 + 500/80 densify | draft 1000. See README.")
+    whole.add_argument("--iterations", type=int, default=None, help="overrides --preset")
+    whole.add_argument("--resolution", type=int, default=None, help="AmbiSuR -r; overrides --preset")
+    whole.add_argument("--densify-from-iter", type=int, default=None, dest="densify_from_iter")
+    whole.add_argument("--densification-interval", type=int, default=None,
+                       dest="densification_interval")
     whole.add_argument("--out-root", default=None, help="results under <root>/<clip>/<frame>; default out/")
     whole.add_argument("--cpus-per-job", type=int, default=None, help="thread limit within the existing allocation")
     whole.add_argument("--smoke", action="store_true", help="frame 0 only at full quality; isolated inputs and out/_smoke/<clip>")

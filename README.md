@@ -465,11 +465,22 @@ The one-second hold is for inspection, not playback at the capture's original 15
 `--preset` picks a point on the iteration curve. Measured on **frame 40 of one clip** (the
 development ORH clip, not C001), same scene and same export filter, so only training changed:
 
+`orhsurf process` (the multi-clip batch path, and therefore `slurm/process_clips.sbatch`)
+**defaults to `economy`**. `orhsurf run` on a single clip still defaults to `quality`, and
+`--smoke` always runs the full recipe — a smoke test that used a cheaper recipe would not tell you
+anything about a quality run.
+
+```bash
+sbatch --array=0-3%2 slurm/process_clips.sbatch C001 C002 C003 C004              # economy
+sbatch --array=0-3%2 slurm/process_clips.sbatch --preset quality C001 C002       # full
+orhsurf process --clips C001 --preset balanced --gpus 8
+```
+
 | preset | iterations | densify | gaussians | support | wall/frame |
 |---|---|---|---|---|---|
-| `quality` (default) | 7000 | 500/100 | 645,249 | **10.21** | 692 s |
+| `quality` | 7000 | 500/100 | 645,249 | **10.21** | 692 s |
 | `balanced` | 3000 | 500/100 | 728,730 | 9.38 | 343 s |
-| `economy` | 2000 | 500/**80** | 676,926 | 9.07 | **261 s** |
+| **`economy`** (batch default) | 2000 | 500/**80** | 676,926 | 9.07 | **261 s** |
 | `draft` | 1000 | 500/100 | 148,377 | 7.90 | 198 s |
 
 `support` is the mean number of cameras whose rendered depth agrees within `--consistency-mm`. It
@@ -478,6 +489,11 @@ before being written down. They have **not** been re-checked across frames or cl
 
 An explicit flag overrides the preset, so `--preset economy --iterations 2500` is legal;
 `--densify-from-iter` and `--densification-interval` are exposed for the same reason.
+
+**What the speedup actually is.** `economy` is **2.65x** faster than `quality` on the part it
+changes (training + export, 692 s -> 261 s). End to end it is less, because the DA3 prior and the
+COLMAP preparation cost the same either way: with DA3 at ~148 s the frame goes from ~840 s to
+~409 s, i.e. **about 2x**. Quote the second number when sizing a Slurm `--time`.
 
 ### Two things the sweep settled, against expectation
 
