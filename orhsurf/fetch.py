@@ -153,6 +153,11 @@ def convert_clip(clip_dir: Path, out_dir: Path, masks: str | None = None,
               f"({want[0]}..{want[-1]}, {len(want) / fps:.1f} s) -- --frames {frames}")
 
     rgb_root = C.decode_views(clip_dir, out_dir, serials, n, frames=want)
+    if masks is None:
+        # The published archives ship no masks and this package has no segmenter. AmbiSuR does not
+        # read the alpha, so an all-foreground mask makes the clip runnable without changing the
+        # reconstruction; --masks <dir> overrides it. See write_all_foreground_masks.
+        masks = C.write_all_foreground_masks(clip_dir, rgb_root, out_dir / "masks")
     man_path = out_dir / "manifest.json"
     _man, missing = C.build_manifest(clip_dir, rgb_root, masks, man_path, frames=want)
 

@@ -169,10 +169,12 @@ def free_vram_mib(device: int) -> int | None:
         return None
 
 
-#: DA3 at the default group size peaks at 23,353 MiB. A 24 GB card exposes ~24,200 MiB, so the
-#: margin is ~3% -- another user's 540 MiB process is enough to OOM us, and we used to discover
-#: that only AFTER paying for prep + dataset_build + scene_build (~90 s) and the DA3 model load.
-REQUIRED_FREE_MIB = 23800
+#: DA3 at the default group size peaks at 23,353 MiB torch-allocated (measured, reproducibly, on
+#: six independent cards).  A 24 GB card reports 24,564 MiB total but only ~23,698 MiB FREE when
+#: completely idle -- the driver/CUDA context takes the rest.  An earlier value of 23,800 was
+#: therefore above what an empty card can ever offer, and the guard rejected every GPU on the box.
+#: 23,450 sits just above the measured peak and below the idle-card ceiling.
+REQUIRED_FREE_MIB = 23450
 
 
 def usable_gpus(gpus: list, required_mib: int = REQUIRED_FREE_MIB, log=print) -> list:

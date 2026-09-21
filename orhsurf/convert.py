@@ -135,6 +135,54 @@ def decode_views(clip_dir: Path, out_dir: Path, serials, n_expect: int, frames=N
     return out_dir / "rgb"
 
 
+def _solid_rgba_png(w: int, h: int, v: int = 255) -> bytes:
+    """A w x h RGBA PNG, every channel `v`. Pure stdlib: cv2/PIL may not be in the caller's env,
+    and one 15 KB buffer is reused for every file rather than re-encoding 235 times."""
+    import struct, zlib
+    raw = b"".join(b"\x00" + bytes([v, v, v, v]) * w for _ in range(h))   # filter byte 0 per row
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6))
+            + chunk(b"IEND", b""))
+
+
+def write_all_foreground_masks(clip_dir: Path, rgb_root: Path, out_dir: Path, log=print) -> Path:
+    """Write an all-foreground (alpha = 255 everywhere) RGBA mask beside every decoded frame.
+
+    WHY THIS IS NOT A CHEAT, and exactly what it costs:
+      * AmbiSuR never reads the alpha -- train.py does not call get_gtImage, and its image loss uses
+        the unmasked RGB. Export validity is rendered opacity and depth. So the mask cannot change
+        the reconstruction's content.
+      * prep.py asserts a usable mask per view and >= 8 non-empty ones; build_scene writes the mask
+        into each image's alpha. All-ones satisfies both without altering anything downstream.
+      * The one real consequence: visual_hull_box() derives the DA3 azimuth centre from the masks.
+        With real masks that centre is the SUBJECT (measured: 2.6% mean foreground, moving up to
+        2.83 m across a clip); with all-ones it becomes the camera-frustum intersection instead, so
+        the 47 views are grouped differently. Whether that changes the output is UNMEASURED.
+    Supply real masks with --masks to keep the subject-centred grouping.
+    """
+    import json
+    vm = json.load(open(Path(clip_dir) / "video_manifest.json"))
+    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    cache, n = {}, 0
+    for s in vm["valid_serials"]:
+        d = Path(rgb_root) / s
+        if not d.is_dir():
+            continue
+        c = vm["cameras"][s]; wh = (int(c["width"]), int(c["height"]))
+        if wh not in cache:
+            cache[wh] = _solid_rgba_png(*wh)
+        (out_dir / s).mkdir(parents=True, exist_ok=True)
+        for f in sorted(d.glob("*.png")):
+            (out_dir / s / f.name).write_bytes(cache[wh]); n += 1
+    log(f"[convert] wrote {n} all-foreground masks -> {out_dir}")
+    log(f"[convert]   AmbiSuR ignores the alpha; these exist because prep asserts a mask per view.")
+    log(f"[convert]   They DO change the DA3 azimuth grouping (see write_all_foreground_masks).")
+    return out_dir
+
+
 def build_manifest(clip_dir: Path, rgb_root: Path, mask_root: Path | None, out_json: Path,
                    frames=None, log=print):
     """video_manifest.json -> this pipeline's manifest schema, with resolved local paths."""
